@@ -2,12 +2,7 @@
     "data-share": {
         "shares": [
             {
-                "name": "fn_qycs",
-                "permission": {
-                    "rw": [
-                        "fn_qycs"
-                    ]
-                }
+                "name": "fn_qycs"
             }
         ]
     }
