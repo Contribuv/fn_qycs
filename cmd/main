@@ -1,0 +1,204 @@
+#!/bin/bash
+# 千盈传送 - 生命周期管理脚本
+VAR_DIR="${TRIM_PKGVAR}"
+PID_FILE="${VAR_DIR}/app.pid"
+APP_DIR="${TRIM_APPDEST}/server"
+
+if [ -n "$TRIM_DATA_SHARE_PATHS" ]; then
+    _SHARE_BASE="${TRIM_DATA_SHARE_PATHS%%:*}"
+    SHARE_LOG_DIR="${_SHARE_BASE}/logs"
+else
+    SHARE_LOG_DIR=""
+fi
+
+if [ -n "$SHARE_LOG_DIR" ]; then
+    LOG_DIR="$SHARE_LOG_DIR"
+elif [ -n "$TRIM_PKGVAR" ]; then
+    LOG_DIR="${TRIM_PKGVAR}/logs"
+else
+    LOG_DIR="/tmp/fn_qycs/logs"
+fi
+
+if [ -n "$TRIM_PKGVAR" ]; then
+    DATA_DIR="${TRIM_PKGVAR}/data"
+else
+    DATA_DIR="/tmp/fn_qycs/data"
+fi
+
+export DATA_DIR
+mkdir -p "$DATA_DIR" "$LOG_DIR" 2>/dev/null || true
+
+INSTALL_CONF="${DATA_DIR}/install.conf"
+[ -f "$INSTALL_CONF" ] && source "$INSTALL_CONF"
+
+if [ -n "$WIZARD_APP_PORT" ]; then
+    APP_PORT="$WIZARD_APP_PORT"
+elif [ -n "$wizard_app_port" ]; then
+    APP_PORT="$wizard_app_port"
+else
+    APP_PORT="5553"
+fi
+export PORT="${APP_PORT}"
+
+APP_LOG="${LOG_DIR}/app.log"
+DEBUG_LOG="${LOG_DIR}/debug.log"
+mkdir -p "$(dirname "$APP_LOG")" 2>/dev/null || true
+
+ARCH=$(uname -m)
+case "$ARCH" in
+    x86_64) BIN_NAME="fn_qycs-server-amd64" ;;
+    aarch64) BIN_NAME="fn_qycs-server-arm64" ;;
+    *) BIN_NAME="fn_qycs-server-amd64" ;;
+esac
+SERVER_BIN="${APP_DIR}/${BIN_NAME}"
+
+log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*" | tee -a "$APP_LOG"; }
+fatal() { log "FATAL: $*"; [ -n "$TRIM_TEMP_LOGFILE" ] && echo "FATAL: $*" >> "$TRIM_TEMP_LOGFILE"; exit 1; }
+
+detect_rproxy() {
+    RPX_DIR="${TRIM_APPDEST}/rproxy"
+    case "$ARCH" in
+        x86_64) RPX_BIN="${RPX_DIR}/qycs-rproxy-amd64" ;;
+        aarch64) RPX_BIN="${RPX_DIR}/qycs-rproxy-arm64" ;;
+        *) RPX_BIN="${RPX_DIR}/qycs-rproxy-amd64" ;;
+    esac
+    [ -f "$RPX_BIN" ] && [ ! -x "$RPX_BIN" ] && chmod +x "$RPX_BIN" 2>/dev/null
+    [ -x "$RPX_BIN" ] && export RPROXY_BIN_PATH="$RPX_BIN" && return 0
+    return 1
+}
+
+start() {
+    log "=== START ==="
+    [ -f "$PID_FILE" ] && { OLD=$(cat "$PID_FILE"); kill -0 "$OLD" 2>/dev/null && { log "进程已在运行 (PID=$OLD)"; exit 0; }; rm -f "$PID_FILE"; }
+
+    # 清理残留 socket
+    rm -f "/var/apps/fn_qycs/target/app.sock" 2>/dev/null || true
+    [ -n "$TRIM_APPDEST" ] && rm -f "${TRIM_APPDEST}/target/app.sock" 2>/dev/null || true
+
+    log "[1/5] 检测二进制文件..."
+    [ ! -x "$SERVER_BIN" ] && chmod +x "$SERVER_BIN" 2>/dev/null
+    [ ! -x "$SERVER_BIN" ] && fatal "二进制文件不存在: $SERVER_BIN"
+    log "  架构: $ARCH, 二进制: $BIN_NAME"
+
+    log "[2/5] 配置数据目录..."
+    log "  数据目录: $DATA_DIR"
+
+    log "[3/5] 检测反向代理..."
+    detect_rproxy && log "  反代可用: $RPX_BIN" || log "  反代未找到"
+
+    log "[4/5] 配置统一网关..."
+    GATEWAY_PREFIX="/app/fn_qycs"
+    export GATEWAY_PREFIX="$GATEWAY_PREFIX"
+    GATEWAY_SOCK_PATH="/var/apps/fn_qycs/target/app.sock"
+    if [ -n "$UNIX_SOCKET" ] && [ "${UNIX_SOCKET:0:1}" = "/" ]; then
+        GATEWAY_SOCK_PATH="$UNIX_SOCKET"
+    elif [ -n "$UNIX_SOCKET" ]; then
+        GATEWAY_SOCK_PATH="/var/apps/fn_qycs/target/${UNIX_SOCKET}"
+    fi
+    SOCK_DIR=$(dirname "$GATEWAY_SOCK_PATH")
+    mkdir -p "$SOCK_DIR" 2>/dev/null
+    [ ! -d "$SOCK_DIR" ] && [ -n "$TRIM_APPDEST" ] && {
+        GATEWAY_SOCK_PATH="${TRIM_APPDEST}/target/app.sock"
+        mkdir -p "${TRIM_APPDEST}/target" 2>/dev/null
+    }
+    export GATEWAY_SOCKET="$GATEWAY_SOCK_PATH"
+    # 备用 socket 路径
+    EXTRA_SOCK="/var/apps/fn_qycs/target/app.sock"
+    if [ "$GATEWAY_SOCK_PATH" != "$EXTRA_SOCK" ]; then
+        export EXTRA_SOCKET_PATH="$EXTRA_SOCK"
+        mkdir -p "$(dirname "$EXTRA_SOCK")" 2>/dev/null
+    elif [ -n "$TRIM_APPDEST" ]; then
+        export EXTRA_SOCKET_PATH="${TRIM_APPDEST}/target/app.sock"
+        mkdir -p "${TRIM_APPDEST}/target" 2>/dev/null
+    fi
+    log "  网关: ${GATEWAY_PREFIX} → ${GATEWAY_SOCK_PATH}"
+
+    log "[5/5] 启动服务..."
+    log "  监听端口: ${APP_PORT}"
+    cd "$APP_DIR" || fatal "无法进入应用目录: $APP_DIR"
+    nohup "$SERVER_BIN" >> "$DEBUG_LOG" 2>&1 &
+    SERVER_PID=$!
+    echo "$SERVER_PID" > "$PID_FILE"
+    sleep 1
+    kill -0 "$SERVER_PID" 2>/dev/null || { rm -f "$PID_FILE"; tail -20 "$DEBUG_LOG" | tee -a "$APP_LOG"; fatal "进程启动失败!"; }
+    sleep 2
+    if kill -0 "$SERVER_PID" 2>/dev/null; then
+        log "  PID=$SERVER_PID"
+        log "=== 启动成功! 端口 ${APP_PORT} ==="
+        exit 0
+    else
+        rm -f "$PID_FILE"
+        fatal "进程 3s 内退出!"
+    fi
+}
+
+stop() {
+    log "=== STOP ==="
+    log "[1/3] 停止反向代理..."
+    if detect_rproxy; then
+        RPX_CONFIG="${DATA_DIR}/rproxy-config.json"
+        if [ -f "$RPX_CONFIG" ]; then
+            RPX_API_PORT=$(grep -o '"api_port":[0-9]*' "$RPX_CONFIG" | grep -o '[0-9]*')
+            if [ -n "$RPX_API_PORT" ] && [ "$RPX_API_PORT" -gt 0 ] 2>/dev/null; then
+                curl -s -X POST "http://127.0.0.1:${RPX_API_PORT}/stop" 2>/dev/null && log "  反代已停止 (API)"
+            fi
+        fi
+        # 清理所有反代进程（可能有多个实例）
+        RPX_PROCS=$(pgrep -f "qycs-rproxy" 2>/dev/null || true)
+        if [ -n "$RPX_PROCS" ]; then
+            echo "$RPX_PROCS" | while read -r pid; do
+                [ -n "$pid" ] && kill "$pid" 2>/dev/null
+            done
+            sleep 1
+            echo "$RPX_PROCS" | while read -r pid; do
+                [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null && kill -9 "$pid" 2>/dev/null
+            done
+            log "  反代进程已清理"
+        fi
+    fi
+
+    log "[2/3] 停止主服务..."
+    if [ -f "$PID_FILE" ]; then
+        PID=$(cat "$PID_FILE")
+        if kill -0 "$PID" 2>/dev/null; then
+            kill "$PID" 2>/dev/null; sleep 2; kill -0 "$PID" 2>/dev/null && kill -9 "$PID" 2>/dev/null
+            log "  进程已停止 (PID=$PID)"
+        else
+            log "  进程不存在"
+        fi
+        rm -f "$PID_FILE"
+    else
+        log "  没有运行中的进程"
+    fi
+
+    log "[3/3] 清理 socket 文件..."
+    rm -f "/var/apps/fn_qycs/target/app.sock" 2>/dev/null || true
+    [ -n "$TRIM_APPDEST" ] && rm -f "${TRIM_APPDEST}/target/app.sock" 2>/dev/null || true
+    [ -n "$GATEWAY_SOCK_PATH" ] && rm -f "$GATEWAY_SOCK_PATH" 2>/dev/null || true
+    log "停止完成"
+    exit 0
+}
+
+status() {
+    # 优先检查 PID 文件和进程是否存活
+    if [ -f "$PID_FILE" ] && kill -0 "$(cat "$PID_FILE")" 2>/dev/null; then
+        exit 0
+    fi
+    # 检查 TCP 端口是否在监听（APP_PORT 可能为空，使用默认值兜底）
+    local check_port="${APP_PORT:-5553}"
+    ss -tlnp 2>/dev/null | grep -q ":${check_port}" && exit 0
+    # 不检查 socket 文件（可能是残留文件）
+    exit 3
+}
+
+uninstall() { log "=== UNINSTALL ==="; stop; log "卸载完成"; exit 0; }
+upgrade() { log "=== UPGRADE ==="; stop; start; }
+
+case "$1" in
+    start) start ;;
+    stop) stop ;;
+    status) status ;;
+    uninstall) uninstall ;;
+    upgrade) upgrade ;;
+    *) echo "用法: $0 {start|stop|status|uninstall|upgrade}"; exit 1 ;;
+esac

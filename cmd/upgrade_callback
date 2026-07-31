@@ -1,0 +1,28 @@
+#!/bin/bash
+### 升级后回调
+
+# ===== 路径解析 =====
+if [ -n "$TRIM_DATA_SHARE_PATHS" ]; then
+    _SHARE_BASE="${TRIM_DATA_SHARE_PATHS%%:*}"
+    SHARE_LOG_DIR="${_SHARE_BASE}/logs"
+else
+    SHARE_LOG_DIR=""
+fi
+
+if [ -n "$SHARE_LOG_DIR" ]; then
+    LOG_DIR="$SHARE_LOG_DIR"
+elif [ -n "$TRIM_PKGVAR" ]; then
+    LOG_DIR="${TRIM_PKGVAR}/logs"
+else
+    LOG_DIR="/tmp/fn_qycs/logs"
+fi
+
+mkdir -p "$LOG_DIR"
+LOG="${LOG_DIR}/upgrade.log"
+
+echo "[$(date '+%Y-%m-%d %H:%M:%S')] === UPGRADE CALLBACK ===" >> "$LOG"
+echo "  升级后回调开始" >> "$LOG"
+echo "  应用升级完成" >> "$LOG"
+echo "[$(date '+%Y-%m-%d %H:%M:%S')] upgrade_callback done" >> "$LOG"
+echo "" >> "$LOG"
+exit 0

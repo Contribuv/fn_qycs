@@ -1,0 +1,15 @@
+#!/bin/bash
+### 卸载前回调
+if [ -n "$TRIM_PKGVAR" ]; then
+    DATA_DIR="${TRIM_PKGVAR}/data"
+    LOG_DIR="${TRIM_PKGVAR}/logs"
+else
+    DATA_DIR="/tmp/fn_qycs/data"
+    LOG_DIR="/tmp/fn_qycs/logs"
+fi
+mkdir -p "$LOG_DIR"
+LOG="${LOG_DIR}/uninstall.log"
+echo "[$(date '+%Y-%m-%d %H:%M:%S')] === UNINSTALL INIT ===" >> "$LOG"
+echo "  卸载模式: ${wizard_uninstall_mode:-keep_data}" >> "$LOG"
+echo "[$(date '+%Y-%m-%d %H:%M:%S')] uninstall_init done" >> "$LOG"
+exit 0

@@ -1,0 +1,21 @@
+#!/bin/bash
+### 安装后回调
+if [ -n "$TRIM_DATA_SHARE_PATHS" ]; then
+    _SHARE_BASE="${TRIM_DATA_SHARE_PATHS%%:*}"
+    SHARE_LOG_DIR="${_SHARE_BASE}/logs"
+else
+    SHARE_LOG_DIR=""
+fi
+if [ -n "$SHARE_LOG_DIR" ]; then
+    LOG_DIR="$SHARE_LOG_DIR"
+elif [ -n "$TRIM_PKGVAR" ]; then
+    LOG_DIR="${TRIM_PKGVAR}/logs"
+else
+    LOG_DIR="/tmp/fn_qycs/logs"
+fi
+mkdir -p "$LOG_DIR"
+LOG="${LOG_DIR}/install.log"
+echo "[$(date '+%Y-%m-%d %H:%M:%S')] === INSTALL CALLBACK ===" >> "$LOG"
+echo "  应用安装完成" >> "$LOG"
+echo "[$(date '+%Y-%m-%d %H:%M:%S')] install_callback done" >> "$LOG"
+exit 0
