@@ -21,8 +21,12 @@ fi
 
 if [ -n "$TRIM_PKGVAR" ]; then
     DATA_DIR="${TRIM_PKGVAR}/data"
+elif [ -n "$TRIM_APPDEST" ]; then
+    # 回退到应用安装目录（持久化，但写入数据不如 PKGVAR 规范）
+    DATA_DIR="${TRIM_APPDEST}/data"
 else
     DATA_DIR="/tmp/fn_qycs/data"
+    log "[WARN] 数据目录使用 /tmp，NAS 重启后反代配置将丢失！"
 fi
 
 export DATA_DIR
