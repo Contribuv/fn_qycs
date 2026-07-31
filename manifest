@@ -1,5 +1,5 @@
 appname               = fn_qycs
-version               = 1.0.1
+version               = 1.0.2
 display_name          = 千盈传送
 desc                  = 打开浏览器就能传文件，对方无需安装任何客户端<br><br>同事催着要大文件？微信传不了？U 盘找不到？<br>发个链接过去，对方浏览器打开就能收，省心省力<br><br>WebRTC P2P 直连传输，文件不经过服务器，内网带宽充分利用<br>手机接收的图片和视频可直接保存到系统相册<br>iOS、Android、Windows、macOS 全平台支持<br><br>内置反向代理，搭配飞牛 DDNS 域名即可从外网访问<br>自动复用飞牛 NAS 系统证书，开箱即用<br><br>主题跟随飞牛系统自动切换，明暗模式无缝衔接<br>x86 与 ARM 双架构支持
 platform              = all
@@ -16,4 +16,4 @@ maintainer            = 豪子
 maintainer_url        = https://github.com/Contribuv/fn_qycs
 distributor           = 豪子
 distributor_url       = https://github.com/Contribuv/fn_qycs
-changelog             = v1.0.1 - 修复反代 TLS 握手兼容性（微信/Schannel）、JS 文件 MIME 类型、WiFi 局域网访问、新增微信浏览器拦截提示；v1.0.0 - 首个版本，WebRTC P2P 直传，内置反向代理，主题适配飞牛系统
+changelog             = v1.0.2 - 修复证书路径 fallback（fullchain.crt 不存在时自动查找域名.crt）、新增局域网 IP 过滤拒绝外网设备、修正安卓保存到相册的 MIME 类型与提示文案；v1.0.1 - 修复反代 TLS 握手兼容性（微信/Schannel）、JS 文件 MIME 类型、WiFi 局域网访问、新增微信浏览器拦截提示；v1.0.0 - 首个版本，WebRTC P2P 直传，内置反向代理，主题适配飞牛系统
