@@ -1,19 +1,10 @@
 [
     {
-        "stepTitle": "卸载选项",
+        "stepTitle": "卸载确认",
         "items": [
             {
-                "type": "select",
-                "field": "wizard_uninstall_mode",
-                "label": "数据处理方式",
-                "initValue": "keep_data",
-                "options": [
-                    {"label": "保留数据卸载（推荐）", "value": "keep_data"},
-                    {"label": "删除数据卸载", "value": "delete_data"}
-                ],
-                "rules": [
-                    {"required": true, "message": "请选择数据处理方式"}
-                ]
+                "type": "tips",
+                "helpText": "<strong>即将卸载千盈传送</strong><br><br>该操作将删除应用及其所有配置数据。<br>卸载后可随时重新安装。"
             }
         ]
     }

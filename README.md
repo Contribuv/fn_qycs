@@ -93,6 +93,21 @@ A: P2P 直传速度取决于局域网络状况。Wi-Fi 下通常可跑满内网�
 
 ## 更新日志
 
+### v1.0.5
+
+- **修复局域网设备发现绕过限制**：收紧 `isLocalEntry` 仅对飞牛统一网关（Unix Socket）放行，反向代理流量改用 `X-Forwarded-For` 真实客户端 IP 判断局域网归属，防止外网设备被误发现
+- **加固 `getClientIP` 防 IP 欺骗**：仅信任来自受信任代理的转发头，直连公网请求忽略伪造的 `X-Forwarded-For`，避免外网设备伪装成局域网
+- **隐藏日志中的证书路径**：实时日志不再显示 `证书路径: cert=..., key=...` 记录，避免暴露 NAS 本地证书文件位置
+
+### v1.0.3
+
+- **移除 WebSocket 局域网限制**：允许通过飞牛统一网关访问，非局域网设备也能连接信令服务
+- **反向代理传递真实 IP**：反代层注入 X-Real-IP/X-Forwarded-For，修复外网设备 IP 全部显示为 127.0.0.1
+- **WebRTC 添加 STUN 服务器**：集成 Google 公共 STUN，跨网络环境下提高 P2P 连接成功率
+- **优化页面引导文案**：slogan 改为「同一 WiFi 下，拖进来就传走」，空设备列表提示「请确认双方连接同一 WiFi」
+- **反代面板主题跟随**：修正 os/theme 事件回调参数，实现与飞牛系统主题实时同步
+- **修复进度弹窗完成按钮**：按钮改为全宽居中显示
+
 ### v1.0.2
 
 - **修复证书路径 fallback**：`cert_manager.go` 新增 `resolveCertPath`/`resolveKeyPath`，当 `fullchain.crt` 不存在时自动查找同目录下的 `{domain}.crt`/`{domain}.pem`，解决反代 TLS 握手失败问题
