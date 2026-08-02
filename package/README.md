@@ -93,6 +93,16 @@ A: P2P 直传速度取决于局域网络状况。Wi-Fi 下通常可跑满内网�
 
 ## 更新日志
 
+### v2.0.0
+
+- **网络分组发现**：同一 NAS 部署局域网的设备互相发现；不同局域网（同公网 IP）的用户互相发现；完全隔离，互不干扰
+- **修复 device_offline 广播丢失 Bug**：`CheckTimeout` 返回 `TimeoutInfo{ID, Scope}` 而非纯 ID 数组，避免设备删除后查不到 scope 导致离线通知丢失
+- **修复 update_name 跨组广播 Bug**：`update_name` 消息改用 `BroadcastToScope` 定向广播，不再泄露设备名给其他网络组
+- **新增公网互传房间系统**：通过 6 位数字暗号创建/加入私密房间，房间内 WebRTC P2P 传输，跨 NAT 穿透
+- **新增公网互传前端 UI**：设置面板开关（默认关闭）+ 房间面板（创建房间/加入房间/房间设备列表/复制暗号）
+- **新增 ICE 服务器配置 API**：`GET /api/ice-servers` 返回 STUN 服务器列表，供跨 NAT WebRTC 使用
+- **新增清除本地数据**：设置面板一键清除 IndexedDB 缓存和接收历史，用户可主动管理隐私数据
+
 ### v1.0.6
 
 - **修复 TLS 嗅探监听器阻塞**：`sniffListener.Accept()` 不再同步调用 `Handshake()`，改为返回 `*tls.Conn` 由 `http.Server` 异步握手，避免单个卡死连接阻塞整个 Accept 循环
