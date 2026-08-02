@@ -25,6 +25,9 @@ fi
 mkdir -p "$LOG_DIR" 2>/dev/null || true
 LOG="${LOG_DIR}/uninstall.log"
 
+# 每次卸载清空旧日志（只保留最新一次卸载的记录）
+: > "$LOG"
+
 echo "[$(date '+%Y-%m-%d %H:%M:%S')] === UNINSTALL CALLBACK ===" >> "$LOG"
 echo "  卸载模式: ${wizard_uninstall_mode:-keep_data}" >> "$LOG"
 echo "  数据目录: ${DATA_DIR}" >> "$LOG"

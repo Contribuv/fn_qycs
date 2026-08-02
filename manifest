@@ -1,7 +1,7 @@
 appname               = fn_qycs
-version               = 1.0.6
+version               = 2.0.0
 display_name          = 千盈传送
-desc                  = 打开浏览器就能传文件，对方无需安装任何客户端<br><br>同事催着要大文件？微信传不了？U 盘找不到？<br>发个链接过去，对方浏览器打开就能收，省心省力<br><br>WebRTC P2P 直连传输，文件不经过服务器，内网带宽充分利用<br>手机接收的图片和视频可直接保存到系统相册<br>iOS、Android、Windows、macOS 全平台支持<br><br>内置反向代理，搭配飞牛 DDNS 域名即可从外网访问<br>自动复用飞牛 NAS 系统证书，开箱即用<br><br>主题跟随飞牛系统自动切换，明暗模式无缝衔接<br>x86 与 ARM 双架构支持
+desc                  = 打开浏览器就能传文件，对方无需安装任何客户端<br><br>同事催着要大文件？微信传不了？U 盘找不到？<br>发个链接过去，对方浏览器打开就能收，省心省力<br><br>WebRTC P2P 直连传输，文件不经过服务器<br>局域网内直传：同网设备自动发现，充分利用内网带宽<br>跨网络互传：通过暗号房间，与异地好友跨网直传文件<br>手机接收的图片和视频可直接保存到系统相册<br>iOS、Android、Windows、macOS 全平台支持<br><br>内置反向代理，搭配飞牛 DDNS 域名即可从外网访问<br>自动复用飞牛 NAS 系统证书，开箱即用<br><br>主题跟随飞牛系统自动切换，明暗模式无缝衔接<br>x86 与 ARM 双架构支持
 platform              = all
 source                = thirdparty
 service_port          = 5553
@@ -16,4 +16,4 @@ maintainer            = 豪子
 maintainer_url        = https://github.com/Contribuv/fn_qycs
 distributor           = 豪子
 distributor_url       = https://github.com/Contribuv/fn_qycs
-changelog             = v1.0.6 - 修复 TLS 嗅探监听器 Accept 阻塞（异步握手避免单连接卡死整个服务）、移除 HTTP→HTTPS 301 重定向（仅提供 HTTPS 访问，明文连接直接关闭）、修复局域网设备发现限制绕过（isLocalEntry 仅放行 Unix Socket，反代流量用真实客户端 IP 判断）、加固 getClientIP 防 IP 欺骗（仅信任受信任代理的 XFF 头）、新增 WiFi 搜索雷达脉冲动画、新增底部一键复制链接分享按钮；v1.0.5 - 重构反向代理（简化 TLS 嗅探逻辑，提升 SSL 兼容性）、修复外网访问状态显示（服务端返回特殊消息，前端识别后停止重连）、修复反代 SSL 证书链加载（支持 fullchain.crt）、HEIC 支持新增 heics 扩展名、设备 IP 仅显示内网 IPv4；v1.0.3 - 移除 WebSocket 局域网限制（支持飞牛统一网关）、反代传递真实客户端 IP、WebRTC 添加 STUN 服务器、优化页面引导文案、反代面板主题实时跟随飞牛系统；v1.0.2 - 修复证书路径 fallback（fullchain.crt 不存在时自动查找域名.crt）、新增局域网 IP 过滤拒绝外网设备、修正安卓保存到相册的 MIME 类型与提示文案；v1.0.1 - 修复反代 TLS 握手兼容性（微信/Schannel）、JS 文件 MIME 类型、WiFi 局域网访问、新增微信浏览器拦截提示；v1.0.0 - 首个版本，WebRTC P2P 直传，内置反向代理，主题适配飞牛系统
+changelog             = v2.0.0 - 跨局域网设备发现（按公网 IP 分组，不同外部 LAN 各自独立发现设备，NAS 仅做信令中继不接触文件数据）
