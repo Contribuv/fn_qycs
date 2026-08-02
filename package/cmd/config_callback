@@ -1,0 +1,26 @@
+#!/bin/bash
+### 配置修改后回调 - 需要重启应用
+if [ -n "$TRIM_PKGVAR" ]; then
+    DATA_DIR="${TRIM_PKGVAR}/data"
+    LOG_DIR="${TRIM_PKGVAR}/logs"
+else
+    DATA_DIR="/tmp/fn_qycs/data"
+    LOG_DIR="/tmp/fn_qycs/logs"
+fi
+mkdir -p "$LOG_DIR"
+LOG="${LOG_DIR}/config.log"
+echo "[$(date '+%Y-%m-%d %H:%M:%S')] === CONFIG CALLBACK ===" >> "$LOG"
+# 保存新配置
+INSTALL_CONF="${DATA_DIR}/install.conf"
+cat > "$INSTALL_CONF" <<EOF
+WIZARD_APP_PORT="${wizard_app_port:-5553}"
+EOF
+# 杀掉旧进程触发重启
+PID_FILE="${TRIM_PKGVAR}/app.pid"
+if [ -f "$PID_FILE" ]; then
+    PID=$(cat "$PID_FILE")
+    kill -0 "$PID" 2>/dev/null && { kill "$PID" 2>/dev/null; sleep 1; kill -9 "$PID" 2>/dev/null; echo "  已重启应用 PID=${PID}" >> "$LOG"; }
+    rm -f "$PID_FILE"
+fi
+echo "[$(date '+%Y-%m-%d %H:%M:%S')] config_callback done" >> "$LOG"
+exit 0

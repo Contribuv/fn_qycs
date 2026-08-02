@@ -1,0 +1,34 @@
+[
+    {
+        "stepTitle": "安装向导",
+        "items": [
+            {
+                "type": "tips",
+                "helpText": "<strong>欢迎使用千盈传送</strong><br><br>局域网文件传输工具，WebRTC P2P 直传，充分利用内网带宽。<br><br>【核心功能】<br>• 浏览器即开即用，无需安装客户端<br>• WebRTC P2P 直传<br>• 支持图片/视频保存到手机相册（需公网访问）<br>• 跨平台支持 iOS/Android/Windows/Mac<br>• 内置反向代理，支持公网 HTTPS 访问<br>• 主题跟随飞牛系统<br>• 支持 x86 / ARM 平台<br><br>点击下一步设置服务端口。"
+            }
+        ]
+    },
+    {
+        "stepTitle": "端口设置",
+        "items": [
+            {
+                "type": "tips",
+                "helpText": "服务监听端口默认为 5553，如提示端口被占用，请更换其他端口。<br>HTTPS 反代端口默认为 7753，可在应用内「公网访问」中修改。"
+            },
+            {
+                "type": "text",
+                "field": "wizard_app_port",
+                "label": "服务监听端口",
+                "initValue": "5553",
+                "rules": [
+                    { "required": true, "message": "请输入监听端口" },
+                    { "pattern": "^[0-9]+$", "message": "端口号必须是数字" }
+                ]
+            },
+            {
+                "type": "tips",
+                "helpText": "<div style=\"background:#ecfdf5;border:1px solid #10b981;border-radius:8px;padding:12px 16px;margin-top:8px;\"><div style=\"color:#065f46;font-weight:600;font-size:15px;margin-bottom:6px;\">使用说明</div><div style=\"color:#064e3b;font-size:13px;line-height:1.6;\"><strong>安装完成后，点击桌面图标即可打开应用。</strong><br>• 内网访问：<code style=\"background:#d1fae5;padding:2px 6px;border-radius:4px;\">http://飞牛IP:5553</code><br>• 公网访问：在应用内的「公网访问」中配置反向代理域名和证书<br>• 应用已接入统一网关，可通过桌面图标直接访问</div></div>"
+            }
+        ]
+    }
+]

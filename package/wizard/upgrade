@@ -1,0 +1,25 @@
+[
+    {
+        "stepTitle": "升级配置",
+        "items": [
+            {
+                "type": "tips",
+                "helpText": "升级千盈传送到最新版本。<br><br>升级过程中会自动保留已有配置和数据。<br>升级完成后服务会自动重启。"
+            },
+            {
+                "type": "text",
+                "field": "wizard_app_port",
+                "label": "监听端口",
+                "initValue": "5553",
+                "rules": [
+                    { "required": true, "message": "请输入监听端口" },
+                    { "pattern": "^[0-9]+$", "message": "端口号必须是数字" }
+                ]
+            },
+            {
+                "type": "tips",
+                "helpText": "如需修改端口，可在此调整。如端口已被占用，请更换其他端口。"
+            }
+        ]
+    }
+]

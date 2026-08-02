@@ -1,0 +1,23 @@
+# 敏感文件
+ssl/
+*.key
+*.crt
+*.pem
+
+# 构建产物
+*.fpk
+fnpack.exe
+test_server.exe
+
+# IDE 内部
+.trae/
+
+# 根目录截图/临时图片
+/*.jpg
+/*.png
+
+# Go
+server-src/vendor/
+
+# 日志
+*.log

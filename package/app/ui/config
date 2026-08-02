@@ -1,0 +1,15 @@
+{
+    ".url": {
+        "fn_qycs.Application": {
+            "title": "千盈传送",
+            "desc": "局域网文件传输工具",
+            "icon": "images/icon_{0}.png",
+            "type": "iframe",
+            "protocol": "",
+            "gatewaySocket": "app.sock",
+            "gatewayPrefix": "/app/fn_qycs",
+            "url": "/app/fn_qycs/gateway",
+            "allUsers": true
+        }
+    }
+}

@@ -1,0 +1,7 @@
+{
+    "defaults": {
+        "run-as": "package"
+    },
+    "username": "fn_qycs",
+    "groupname": "fn_qycs"
+}

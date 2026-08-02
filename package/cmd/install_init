@@ -1,0 +1,41 @@
+#!/bin/bash
+### 安装前初始化回调
+
+# ===== 路径解析 =====
+if [ -n "$TRIM_DATA_SHARE_PATHS" ]; then
+    _SHARE_BASE="${TRIM_DATA_SHARE_PATHS%%:*}"
+    SHARE_LOG_DIR="${_SHARE_BASE}/logs"
+else
+    SHARE_LOG_DIR=""
+fi
+
+if [ -n "$SHARE_LOG_DIR" ]; then
+    LOG_DIR="$SHARE_LOG_DIR"
+elif [ -n "$TRIM_PKGVAR" ]; then
+    LOG_DIR="${TRIM_PKGVAR}/logs"
+else
+    LOG_DIR="/tmp/fn_qycs/logs"
+fi
+
+if [ -n "$TRIM_PKGVAR" ]; then
+    DATA_DIR="${TRIM_PKGVAR}/data"
+else
+    DATA_DIR="/tmp/fn_qycs/data"
+fi
+
+mkdir -p "$DATA_DIR" "$LOG_DIR"
+LOG="${LOG_DIR}/install.log"
+
+echo "[$(date '+%Y-%m-%d %H:%M:%S')] === INSTALL INIT ===" >> "$LOG"
+echo "  数据目录: ${DATA_DIR}" >> "$LOG"
+echo "  日志目录: ${LOG_DIR}" >> "$LOG"
+env | grep -E "^TRIM_|^wizard_" | sort >> "$LOG" 2>/dev/null || true
+
+INSTALL_CONF="${DATA_DIR}/install.conf"
+cat > "$INSTALL_CONF" <<EOF
+# 安装时配置 - 由 install_init 自动生成
+WIZARD_APP_PORT="${wizard_app_port:-5553}"
+EOF
+echo "  安装配置已保存: ${INSTALL_CONF}" >> "$LOG"
+echo "[$(date '+%Y-%m-%d %H:%M:%S')] install_init done" >> "$LOG"
+exit 0
