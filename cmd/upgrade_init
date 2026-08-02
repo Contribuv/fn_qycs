@@ -1,0 +1,59 @@
+#!/bin/bash
+### 升级前回调 - 备份配置、保留旧端口
+
+# ===== 路径解析 =====
+if [ -n "$TRIM_DATA_SHARE_PATHS" ]; then
+    _SHARE_BASE="${TRIM_DATA_SHARE_PATHS%%:*}"
+    SHARE_LOG_DIR="${_SHARE_BASE}/logs"
+else
+    SHARE_LOG_DIR=""
+fi
+
+if [ -n "$SHARE_LOG_DIR" ]; then
+    LOG_DIR="$SHARE_LOG_DIR"
+elif [ -n "$TRIM_PKGVAR" ]; then
+    LOG_DIR="${TRIM_PKGVAR}/logs"
+else
+    LOG_DIR="/tmp/fn_qycs/logs"
+fi
+
+if [ -n "$TRIM_PKGVAR" ]; then
+    DATA_DIR="${TRIM_PKGVAR}/data"
+else
+    DATA_DIR="/tmp/fn_qycs/data"
+fi
+
+mkdir -p "$DATA_DIR" "$LOG_DIR"
+LOG="${LOG_DIR}/upgrade.log"
+
+echo "[$(date '+%Y-%m-%d %H:%M:%S')] === UPGRADE INIT ===" >> "$LOG"
+echo "  数据目录: ${DATA_DIR}" >> "$LOG"
+echo "  日志目录: ${LOG_DIR}" >> "$LOG"
+env | grep -E "^TRIM_|^wizard_" | sort >> "$LOG" 2>/dev/null || true
+
+INSTALL_CONF="${DATA_DIR}/install.conf"
+RPX_CONFIG="${DATA_DIR}/rproxy-config.json"
+
+if [ -f "$INSTALL_CONF" ]; then
+    cp "$INSTALL_CONF" "${INSTALL_CONF}.bak.$(date +%Y%m%d%H%M%S)"
+    echo "  install.conf 已备份" >> "$LOG"
+    # POSIX grep（不用 -P），兼容所有 NAS
+    OLD_PORT=$(grep 'WIZARD_APP_PORT=' "$INSTALL_CONF" 2>/dev/null | head -1 | sed 's/.*WIZARD_APP_PORT=//' | sed 's/[^0-9].*//')
+    [ -z "$OLD_PORT" ] && OLD_PORT="5553"
+else
+    OLD_PORT="5553"
+fi
+
+if [ -f "$RPX_CONFIG" ]; then
+    cp "$RPX_CONFIG" "${RPX_CONFIG}.bak.$(date +%Y%m%d%H%M%S)"
+    echo "  rproxy-config.json 已备份" >> "$LOG"
+fi
+
+NEW_PORT="${wizard_app_port:-$OLD_PORT}"
+cat > "$INSTALL_CONF" <<EOF
+WIZARD_APP_PORT="${NEW_PORT}"
+EOF
+echo "  监听端口: ${NEW_PORT}" >> "$LOG"
+
+echo "[$(date '+%Y-%m-%d %H:%M:%S')] upgrade_init done" >> "$LOG"
+exit 0

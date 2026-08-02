@@ -1,0 +1,13 @@
+#!/bin/bash
+### 配置修改前回调
+if [ -n "$TRIM_PKGVAR" ]; then
+    LOG_DIR="${TRIM_PKGVAR}/logs"
+else
+    LOG_DIR="/tmp/fn_qycs/logs"
+fi
+mkdir -p "$LOG_DIR"
+LOG="${LOG_DIR}/config.log"
+echo "[$(date '+%Y-%m-%d %H:%M:%S')] === CONFIG INIT ===" >> "$LOG"
+env | grep -E "^TRIM_|^wizard_" | sort >> "$LOG" 2>/dev/null || true
+echo "[$(date '+%Y-%m-%d %H:%M:%S')] config_init done" >> "$LOG"
+exit 0

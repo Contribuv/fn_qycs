@@ -1,0 +1,11 @@
+[
+    {
+        "stepTitle": "卸载确认",
+        "items": [
+            {
+                "type": "tips",
+                "helpText": "<strong>即将卸载千盈传送</strong><br><br>该操作将删除应用及其所有配置数据。<br>卸载后可随时重新安装。"
+            }
+        ]
+    }
+]

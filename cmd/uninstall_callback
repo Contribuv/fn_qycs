@@ -1,0 +1,67 @@
+#!/bin/bash
+### 卸载后回调
+# ===== 路径解析（统一模板）=====
+if [ -n "$TRIM_DATA_SHARE_PATHS" ]; then
+    _SHARE_BASE="${TRIM_DATA_SHARE_PATHS%%:*}"
+    SHARE_LOG_DIR="${_SHARE_BASE}/logs"
+else
+    SHARE_LOG_DIR=""
+fi
+
+if [ -n "$SHARE_LOG_DIR" ]; then
+    LOG_DIR="$SHARE_LOG_DIR"
+elif [ -n "$TRIM_PKGVAR" ]; then
+    LOG_DIR="${TRIM_PKGVAR}/logs"
+else
+    LOG_DIR="/tmp/fn_qycs/logs"
+fi
+
+if [ -n "$TRIM_PKGVAR" ]; then
+    DATA_DIR="${TRIM_PKGVAR}/data"
+else
+    DATA_DIR="/tmp/fn_qycs/data"
+fi
+
+mkdir -p "$LOG_DIR" 2>/dev/null || true
+LOG="${LOG_DIR}/uninstall.log"
+
+# 每次卸载清空旧日志（只保留最新一次卸载的记录）
+: > "$LOG"
+
+echo "[$(date '+%Y-%m-%d %H:%M:%S')] === UNINSTALL CALLBACK ===" >> "$LOG"
+echo "  卸载模式: ${wizard_uninstall_mode:-keep_data}" >> "$LOG"
+echo "  数据目录: ${DATA_DIR}" >> "$LOG"
+echo "  日志目录: ${LOG_DIR}" >> "$LOG"
+
+if [ "$wizard_uninstall_mode" = "delete_data" ]; then
+    echo "  用户选择删除所有数据，开始清理..." >> "$LOG"
+
+    # 删除数据目录
+    if [ -d "$DATA_DIR" ]; then
+        rm -rf "$DATA_DIR"
+        echo "  已删除数据目录: ${DATA_DIR}" >> "$LOG"
+    else
+        echo "  数据目录不存在: ${DATA_DIR}" >> "$LOG"
+    fi
+
+    # 先记录日志再删除日志目录
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] uninstall_callback done (data deleted)" >> "$LOG"
+    echo "" >> "$LOG"
+
+    # 删除日志目录（此时日志已写入，可以安全删除）
+    if [ -n "$SHARE_LOG_DIR" ]; then
+        # 共享日志目录只删除本应用的部分
+        rm -rf "$SHARE_LOG_DIR" 2>/dev/null || true
+    elif [ -n "$TRIM_PKGVAR" ]; then
+        rm -rf "${TRIM_PKGVAR}/logs" 2>/dev/null || true
+    fi
+
+    # 清理 PKGVAR 下残留
+    if [ -n "$TRIM_PKGVAR" ] && [ -d "$TRIM_PKGVAR" ]; then
+        rm -rf "${TRIM_PKGVAR}/data" 2>/dev/null || true
+    fi
+else
+    echo "  保留数据" >> "$LOG"
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] uninstall_callback done (data kept)" >> "$LOG"
+fi
+exit 0
