@@ -145,10 +145,15 @@ stop() {
                 sleep 1
             fi
 
-            # 检查是否有残留的反代端口监听
-            RPROXY_PID=$(ss -tlnp 2>/dev/null | grep -E ':7753|:1443' | awk '{print $NF}' | grep -oP 'pid=\K\d+' | head -1)
+            # 检查是否有残留的反代端口监听（端口随配置可变，动态读取兜底）
+            RPROXY_PORT="7753"
+            if [ -f "${DATA_DIR}/rproxy-config.json" ]; then
+                _cfg_port=$(grep -oP '"port"\s*:\s*\K[0-9]+' "${DATA_DIR}/rproxy-config.json" 2>/dev/null | head -1)
+                [ -n "$_cfg_port" ] && RPROXY_PORT="$_cfg_port"
+            fi
+            RPROXY_PID=$(ss -tlnp 2>/dev/null | grep -E ":${RPROXY_PORT}" | awk '{print $NF}' | grep -oP 'pid=\K\d+' | head -1)
             if [ -n "$RPROXY_PID" ]; then
-                log "  清理残留反代进程 PID=$RPROXY_PID"
+                log "  清理残留反代进程 PID=$RPROXY_PID (端口 ${RPROXY_PORT})"
                 kill -9 "$RPROXY_PID" 2>/dev/null || true
             fi
         else
@@ -182,9 +187,15 @@ uninstall() {
     log "=== UNINSTALL ==="
     log "[1/2] 停止所有服务..."
     stop
-    log "[2/2] 清理配置..."
-    # 保留日志以便排查问题，只清理运行时数据
-    [ -n "$DATA_DIR" ] && rm -f "${DATA_DIR}/rproxy-config.json" 2>/dev/null || true
+    log "[2/2] 清理配置与数据..."
+    # 与卸载向导文案一致：删除应用及其所有配置数据
+    # 仅保留日志目录（LOG_DIR）以便排查，不删除日志
+    if [ -n "$DATA_DIR" ] && [ -d "$DATA_DIR" ]; then
+        rm -f "${DATA_DIR}/install.conf" 2>/dev/null || true
+        rm -f "${DATA_DIR}/rproxy-config.json" 2>/dev/null || true
+        rm -rf "${DATA_DIR}" 2>/dev/null || true
+        log "  已清理数据目录: ${DATA_DIR}"
+    fi
     log "卸载完成（日志保留在 ${LOG_DIR}/）"
     exit 0
 }
