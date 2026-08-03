@@ -13,7 +13,7 @@
         "items": [
             {
                 "type": "tips",
-                "helpText": "服务监听端口默认为 5553，如提示端口被占用，请更换其他端口。<br>HTTPS 反代端口默认为 7753，可在应用内「公网访问」中修改。"
+                "helpText": "服务监听端口默认为 5553，如提示端口被占用，请更换其他端口。<br>HTTPS 反代端口默认为 7753，可在应用内「公网访问」中修改。<br><br><span style=\"color:#b45309;\">跨网传输说明：</span>设计上默认<span style=\"color:#b91c1c;\">不走 TURN 中继</span>。若收发双方均处于对称型 NAT / 严格防火墙，仅靠 STUN 无法穿透，<span style=\"color:#b91c1c;\">跨网互传不被支持</span>（应用会提示「不支持 TURN 中继互传」并阻止发送）。如确需跨网，请在环境变量配置 <code style=\"background:#fef3c7;padding:1px 5px;border-radius:4px;\">TURN_URLS</code> 启用中继；否则请改用同一局域网/热点传输。"
             },
             {
                 "type": "text",
