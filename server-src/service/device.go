@@ -18,11 +18,12 @@ const (
 
 // Device 设备信息
 type Device struct {
-	ID        string    `json:"id"`
-	Name      string    `json:"name"`
-	IP        string    `json:"ip"`
-	OnlineAt  time.Time `json:"onlineAt"`
-	LastBeat  time.Time `json:"lastBeat"`
+	ID         string    `json:"id"`
+	Name       string    `json:"name"`
+	IP         string    `json:"ip"`         // 连接服务器的真实客户端 IP
+	LocalLanIP string    `json:"localLanIp"` // 前端 WebRTC 探测到的本机局域网 IP（用于"同用户子网"判定）
+	OnlineAt   time.Time `json:"onlineAt"`
+	LastBeat   time.Time `json:"lastBeat"`
 }
 
 // DeviceManager 设备管理器
@@ -52,6 +53,10 @@ func GetDeviceManager() *DeviceManager {
 
 // Register 注册设备（如果设备ID已存在则复用原记录，仅刷新活跃时间）
 func (dm *DeviceManager) Register(id, name, ip string) *Device {
+	return dm.RegisterWithLan(id, name, ip, "")
+}
+// RegisterWithLan 注册设备并写入前端探测到的局域网 IP
+func (dm *DeviceManager) RegisterWithLan(id, name, ip, lanIP string) *Device {
 	dm.mu.Lock()
 	defer dm.mu.Unlock()
 
@@ -64,17 +69,21 @@ func (dm *DeviceManager) Register(id, name, ip string) *Device {
 			existing.Name = name
 		}
 		existing.IP = ip
+		if lanIP != "" {
+			existing.LocalLanIP = lanIP
+		}
 		// 从离线缓存移除
 		delete(dm.offlineDevices, id)
 		return existing
 	}
 
 	device := &Device{
-		ID:       id,
-		Name:     name,
-		IP:       ip,
-		OnlineAt: time.Now(),
-		LastBeat: time.Now(),
+		ID:         id,
+		Name:       name,
+		IP:         ip,
+		LocalLanIP: lanIP,
+		OnlineAt:   time.Now(),
+		LastBeat:   time.Now(),
 	}
 
 	dm.devices[id] = device
@@ -83,6 +92,18 @@ func (dm *DeviceManager) Register(id, name, ip string) *Device {
 
 // TryRegisterOrReuse 尝试复用旧设备（同IP+同用户名的离线设备），否则注册新设备
 // 返回 (deviceID, device, isReused)
+
+// UpdateLanIP 更新设备前端探测到的局域网 IP（用户连接热点/WiFi 后上报）
+func (dm *DeviceManager) UpdateLanIP(id, lanIP string) {
+	if lanIP == "" {
+		return
+	}
+	dm.mu.Lock()
+	defer dm.mu.Unlock()
+	if d, ok := dm.devices[id]; ok {
+		d.LocalLanIP = lanIP
+	}
+}
 func (dm *DeviceManager) TryRegisterOrReuse(ip, name string) (string, *Device, bool) {
 	dm.mu.Lock()
 	defer dm.mu.Unlock()

@@ -63,7 +63,7 @@ func handleGatewayPage(w http.ResponseWriter, r *http.Request) {
 		"localIp":   getLocalIP(),
 		"localPort": parsePort(gatewayBackend),
 		"author":    "联系反馈 微信：CQGGTF",
-		"version":   "1.0.6",
+		"version":   "2.0.0",
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	if err := gatewayTmpl.Execute(w, data); err != nil {

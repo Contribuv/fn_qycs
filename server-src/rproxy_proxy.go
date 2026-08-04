@@ -54,7 +54,7 @@ func (lm *logManager) SetLogFile(logDir string) error {
 		return fmt.Errorf("创建日志目录失败: %v", err)
 	}
 	lm.logPath = filepath.Join(logDir, "rproxy.log")
-	f, err := os.OpenFile(lm.logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
+	f, err := os.OpenFile(lm.logPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0644)
 	if err != nil {
 		return fmt.Errorf("打开日志文件失败: %v", err)
 	}

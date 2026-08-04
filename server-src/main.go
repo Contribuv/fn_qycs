@@ -28,7 +28,7 @@ func main() {
 	os.MkdirAll(logDir, 0755)
 	initMainLogger(logDir)
 
-	mainLogger("INFO", fmt.Sprintf("========== 千盈传送 启动 =========="))
+	mainLogger("INFO", "========== 千盈传送 启动 ==========")
 	mainLogger("INFO", fmt.Sprintf("日志目录: %s", logDir))
 	mainLogger("INFO", fmt.Sprintf("数据目录: %s", DataDir()))
 
@@ -45,6 +45,9 @@ func main() {
 	mux.HandleFunc("/api/upload-complete", handler.GetUploadHandler().HandleUploadComplete)
 	mux.HandleFunc("/api/task/", handler.GetUploadHandler().GetTask)
 	mux.HandleFunc("/api/cancel-task", handler.GetUploadHandler().CancelTask)
+
+	// 公网 WebRTC ICE 服务器列表（v2.0.1 房间系统需要）
+	mux.HandleFunc("/api/ice-servers", handler.HandleIceServers)
 
 	// 文件下载路由
 	mux.HandleFunc("/download/", handler.GetDownloadHandler().HandleDownload)
@@ -353,7 +356,7 @@ func initMainLogger(logDir string) {
 		return
 	}
 	logPath := filepath.Join(logDir, "main.log")
-	f, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
+	f, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0644)
 	if err != nil {
 		log.Printf("打开主日志文件失败: %v", err)
 		return

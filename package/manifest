@@ -1,7 +1,7 @@
 appname               = fn_qycs
-version               = 2.0.1
+version               = 2.0.2
 display_name          = 千盈传送
-desc                  = 打开浏览器就能传文件，对方无需安装任何客户端<br><br>同事催着要大文件？微信传不了？U 盘找不到？<br>发个链接过去，对方浏览器打开就能收，省心省力<br><br>WebRTC P2P 直连传输，文件不经过服务器<br>局域网内直传：与服务器同子网或连同一热点/WiFi 的设备自动发现、直连快传<br>跨网络互传：通过暗号房间，与异地好友跨网直传文件（公网备选方案）<br>手机接收的图片和视频可直接保存到系统相册<br>iOS、Android、Windows、macOS 全平台支持<br><br>内置反向代理，搭配飞牛 DDNS 域名即可从外网访问<br>自动复用飞牛 NAS 系统证书，开箱即用<br><br>主题跟随飞牛系统自动切换，明暗模式无缝衔接<br>x86 与 ARM 双架构支持
+desc                  = 临时救场，收发文件，一个网页搞定！<br><br>微信传不了？U 盘找不到？发个链接，对方浏览器打开就能收<br><br>局域网互传：同 WiFi / 同子网设备自动发现，点对点直传<br>跨公网互传：通过暗号房间，异地也能直传文件<br><br>基于 WebRTC P2P 技术，文件不经过服务器<br>受 WebRTC 数据通道限制，单文件最大 50MB<br><br>手机接收的图片/视频可直接保存到系统相册<br>iOS、Android、Windows、macOS 全平台支持<br><br>内置反向代理，搭配飞牛 DDNS 即可外网访问<br>主题跟随系统明暗自动切换
 platform              = all
 source                = thirdparty
 service_port          = 5553
@@ -16,4 +16,4 @@ maintainer            = 豪子
 maintainer_url        = https://github.com/Contribuv/fn_qycs
 distributor           = 豪子
 distributor_url       = https://github.com/Contribuv/fn_qycs
-changelog             = v2.0.1 - 网络隔离逻辑重构：仅与服务器同子网或连同一热点/WiFi（同用户子网）的设备才自动互见并直连；公网/异网/跨子网用户仅可通过暗号房间互传，不再互相暴露设备。前端公网模式下强制切换至房间 Tab，修复重复提示文案。设备昵称改为公平随机分配（固定名与组合名融合进同一洗牌池，各昵称出现频率一致）
+changelog             = v2.0.2 - 修复稳定性问题，优化传输性能

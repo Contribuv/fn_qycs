@@ -6,8 +6,8 @@
     <meta name="theme-color" content="#f5f6f8">
     <link rel="icon" href="static/favicon.ico" sizes="any">
     <link rel="apple-touch-icon" href="static/favicon.ico">
-    <title>千盈传送 - 内网传输</title>
-    <link rel="stylesheet" href="static/css/style.css">
+    <title>千盈传送 - 轻松文件传输</title>
+    <link rel="stylesheet" href="static/css/style.css?v=2.0.5">
 </head>
 <body>
 <div id="app">
@@ -26,6 +26,7 @@
         <div class="header-right">
             <span class="status" id="status">
                 <span class="status-dot"></span>
+                <span class="status-text" id="statusText"></span>
             </span>
             <button class="header-btn" id="settingsBtn" title="设置">
                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.6 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.6a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
@@ -39,13 +40,17 @@
         <div class="mode-panel" id="sendPanel">
             <section class="section">
                 <div class="section-head">
-                    <span class="section-title">附近的设备</span>
+                    <span class="section-title">设备列表</span>
                     <div class="section-actions">
                         <span class="count-badge" id="deviceCount">0</span>
                         <button class="refresh-btn" id="refreshDevices" title="刷新设备列表">
                             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg>
                         </button>
                     </div>
+                </div>
+                <div class="device-view-tabs">
+                    <button class="device-view-tab active" id="deviceTabLan" data-view="lan">局域网</button>
+                    <button class="device-view-tab" id="deviceTabRoom" data-view="room">房间</button>
                 </div>
                 <div class="device-scroll" id="deviceScroll">
                     <div class="device-grid" id="deviceGrid"></div>
@@ -56,10 +61,45 @@
                         <span class="wifi-scan-ring"></span>
                         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12.55a11 11 0 0 1 14.08 0"/><path d="M1.42 9a16 16 0 0 1 21.16 0"/><path d="M8.53 16.11a6 6 0 0 1 6.95 0"/><line x1="12" y1="20" x2="12.01" y2="20"/></svg>
                     </div>
-                    <p>正在搜索附近设备…</p>
-                    <p class="empty-hint">请确认双方连接同一 WiFi</p>
+                    <p>正在搜索设备…</p>
+                    <p class="empty-hint" id="emptyDevicesHint">请确认双方连接同一 WiFi</p>
                 </div>
             </section>
+
+            <!-- 跨网络互传（折叠面板，默认收起）-->
+            <div class="room-collapse" id="roomCollapse">
+                <button class="room-collapse-head" id="roomToggle">
+                    <svg class="room-collapse-arrow" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg>
+                    <span>跨网络互传</span>
+                    <span class="net-cap-pill" id="netCapPill" data-level="unknown">
+                        <span class="net-cap-dot"></span>
+                        <span class="net-cap-pill-text" id="netCapPillText">检测中…</span>
+                    </span>
+                    <span class="room-collapse-hint" id="roomCollapseHint">暗号连接</span>
+                </button>
+                <div class="room-collapse-body hidden" id="roomBody">
+                    <div class="room-idle" id="roomIdle">
+                        <div class="room-hint">创建房间获得暗号，分享给对方，对方输入暗号即可互传文件</div>
+                        <button class="room-btn room-btn-create" id="roomCreateBtn">创建房间</button>
+                        <div class="room-divider"><span>或加入已有房间</span></div>
+                        <div class="room-action-row">
+                            <input type="text" class="room-code-input" id="roomCodeInput" placeholder="输入 6 位暗号" maxlength="6" inputmode="numeric">
+                            <button class="room-btn room-btn-join" id="roomJoinBtn">加入</button>
+                        </div>
+                    </div>
+                    <div class="room-active hidden" id="roomActive">
+                        <div class="room-code-display">
+                            <span class="room-code-label">房间号</span>
+                            <span class="room-code-value" id="roomCodeDisplay">— — — — — —</span>
+                            <button class="room-code-copy" id="roomCodeCopy" title="复制房间号">
+                                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
+                            </button>
+                        </div>
+                        <div class="room-active-tip">房间成员已显示在上方「房间」设备列表，点击即可发送</div>
+                        <button class="room-leave-btn" id="roomLeaveBtn">离开房间</button>
+                    </div>
+                </div>
+            </div>
 
             <section class="section">
                 <div class="section-head">
@@ -71,7 +111,7 @@
                     <div class="dropzone-inner">
                         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
                         <span class="dropzone-main">点击或拖入文件</span>
-                        <span class="dropzone-sub">单次推荐传 1 个文件</span>
+                        <span class="dropzone-sub">单次推荐传 1 个文件，单文件 ≤ 50MB</span>
                     </div>
                 </div>
                 <div class="file-queue" id="fileQueue"></div>
@@ -90,7 +130,6 @@
 
         <!-- 接收模式 -->
         <div class="mode-panel hidden" id="recvPanel">
-            <!-- 微信浏览器不支持接收提示 -->
             <div class="wechat-notice hidden" id="wechatNotice">
                 <div class="wechat-notice-icon">
                     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
@@ -155,7 +194,7 @@
         <div class="modal-head">
             <h3>设置</h3>
             <button class="close-btn" id="closeSettings"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button>
-        </div>
+            </div>
         <div class="modal-body">
             <div class="setting-row">
                 <label class="setting-label">你的名字</label>
@@ -164,45 +203,26 @@
             <div class="setting-row">
                 <label class="setting-label">主题</label>
                 <div class="theme-switch">
-                    <button class="theme-opt" data-theme="auto">跟随系统</button>
+                    <button class="theme-opt" data-theme="auto">跟随</button>
                     <button class="theme-opt active" data-theme="light">浅色</button>
                     <button class="theme-opt" data-theme="dark">深色</button>
+                    <button class="theme-opt" id="aboutFromTheme">关于</button>
                 </div>
             </div>
-        </div>
-        <div class="modal-foot">
-            <button class="text-btn" id="openAbout">关于</button>
+            <div class="setting-row setting-row-btn">
+                <button class="setting-danger-btn" id="clearDataBtn">清除本设备数据</button>
+            </div>
         </div>
     </div>
 </div>
 
 <!-- 关于弹窗 -->
 <div class="overlay hidden" id="aboutOverlay">
-    <div class="modal">
-        <div class="modal-head">
-            <h3>关于</h3>
-            <button class="close-btn" id="closeAbout"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button>
-        </div>
+    <div class="modal about-modal">
+        <button class="about-close" id="closeAbout"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button>
         <div class="about-body">
-            <div class="about-icon">
-                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="17 1 21 5 17 9"/><path d="M3 11V9a4 4 0 0 1 4-4h14"/><polyline points="7 23 3 19 7 15"/><path d="M21 13v2a4 4 0 0 1-4 4H3"/></svg>
-            </div>
-            <h4 class="about-title">千盈传送</h4>
-            <p class="about-desc">一个运行在飞牛 NAS 上的局域网文件传输工具，基于 WebRTC P2P 直传，无需安装，浏览器打开即用。</p>
-            <div class="about-features">
-                <div class="about-feature">
-                    <span class="about-feature-dot"></span>
-                    <span>内网直传，充分利用带宽</span>
-                </div>
-                <div class="about-feature">
-                    <span class="about-feature-dot"></span>
-                    <span>支持图片、视频、文档等格式</span>
-                </div>
-                <div class="about-feature">
-                    <span class="about-feature-dot"></span>
-                    <span>跨越平台：Windows、iOS、Android</span>
-                </div>
-            </div>
+            <p class="about-desc">运行在飞牛 NAS 上的文件传输工具，基于 WebRTC P2P 直传，浏览器打开即用。</p>
+            <a class="about-version" id="aboutVersion" href="https://github.com/Contribuv/fn_qycs" target="_blank" rel="noopener noreferrer">v…</a>
         </div>
     </div>
 </div>
@@ -225,6 +245,24 @@
     </div>
 </div>
 
+<!-- 文件大小超限提醒浮窗 -->
+<div class="overlay hidden" id="sizeLimitOverlay">
+    <div class="modal">
+        <div class="receive-icon">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
+        </div>
+        <div class="receive-info">
+            <p class="receive-from">文件大小超限，单文件最大支持 <strong id="sizeLimitMax">50 MB</strong></p>
+            <div class="receive-file">
+                <span class="receive-file-name" id="sizeLimitFiles">—</span>
+            </div>
+        </div>
+        <div class="receive-actions">
+            <button class="btn-primary" id="sizeLimitOk">知道了</button>
+        </div>
+    </div>
+</div>
+
 <!-- 进度弹窗 -->
 <div class="overlay hidden" id="progressOverlay">
     <div class="modal">
@@ -240,7 +278,10 @@
                 <span id="progressSpeed">—</span>
             </div>
         </div>
-        <button class="btn-primary hidden" id="progressDone">完成</button>
+        <div class="progress-actions">
+            <button class="btn-secondary hidden" id="progressCancel">取消</button>
+            <button class="btn-primary hidden" id="progressDone">完成</button>
+        </div>
     </div>
 </div>
 
@@ -256,6 +297,6 @@ document.addEventListener('touchend', (e) => {
     lastTouchEnd = now;
 }, { passive: false });
 </script>
-<script src="static/js/app.js"></script>
+<script src="static/js/app.js?v=2.0.5"></script>
 </body>
 </html>
