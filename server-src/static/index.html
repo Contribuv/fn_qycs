@@ -7,7 +7,7 @@
     <link rel="icon" href="static/favicon.ico" sizes="any">
     <link rel="apple-touch-icon" href="static/favicon.ico">
     <title>千盈传送 - 轻松文件传输</title>
-    <link rel="stylesheet" href="static/css/style.css?v=2.0.5">
+    <link rel="stylesheet" href="static/css/style.css?v={{.version}}">
 </head>
 <body>
 <div id="app">
@@ -111,7 +111,7 @@
                     <div class="dropzone-inner">
                         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
                         <span class="dropzone-main">点击或拖入文件</span>
-                        <span class="dropzone-sub">单次推荐传 1 个文件，单文件 ≤ 50MB</span>
+                        <span class="dropzone-sub">单次推荐传 1 个文件，单文件 ≤ <span id="maxSizeDisplay">50</span>MB</span>
                     </div>
                 </div>
                 <div class="file-queue" id="fileQueue"></div>
@@ -130,14 +130,10 @@
 
         <!-- 接收模式 -->
         <div class="mode-panel hidden" id="recvPanel">
-            <div class="wechat-notice hidden" id="wechatNotice">
-                <div class="wechat-notice-icon">
-                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
-                </div>
-                <h3 class="wechat-notice-title">微信浏览器不支持接收</h3>
-                <p class="wechat-notice-desc">接收文件需要使用 WebRTC 等功能，微信浏览器无法正常工作。你仍可使用「发送」功能传文件，或复制链接到系统浏览器打开以使用接收功能。</p>
-                <button class="wechat-notice-btn" id="wechatCopyBtn" type="button">复制链接到浏览器打开</button>
-                <p class="wechat-notice-tip">提示：点击右上角 ··· 选择「在浏览器打开」</p>
+            <div class="wechat-banner hidden" id="wechatNotice">
+                <span class="wechat-banner-icon">⚠</span>
+                <span class="wechat-banner-text">微信浏览器可能存在兼容问题，建议</span>
+                <button class="wechat-banner-btn" id="wechatCopyBtn" type="button">复制链接在浏览器打开</button>
             </div>
             <div class="recv-hero" id="recvHero">
                 <div class="recv-hero-icon-wrap">
@@ -171,6 +167,16 @@
             </button>
         </div>
     </main>
+
+    <!-- PC 端右侧二维码（桌面宽屏时显示）-->
+    <aside class="qr-sidebar" id="qrSidebar">
+        <div class="qr-card">
+            <div class="qr-title">扫码即连</div>
+            <p class="qr-desc" id="qrDesc">手机上打开此页面</p>
+            <img class="qr-img" id="qrImg" src="" alt="QR码">
+            <p class="qr-hint">微信 / 浏览器扫码</p>
+        </div>
+    </aside>
 </div>
 
 <!-- 媒体预览弹窗（图片/视频长按保存到相册）-->
@@ -297,6 +303,7 @@ document.addEventListener('touchend', (e) => {
     lastTouchEnd = now;
 }, { passive: false });
 </script>
-<script src="static/js/app.js?v=2.0.5"></script>
+<script src="static/js/qrcode-gen.min.js?v={{.version}}"></script>
+<script src="static/js/app.js?v={{.version}}"></script>
 </body>
 </html>

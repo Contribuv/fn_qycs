@@ -1,16 +1,22 @@
 package service
 
 import (
+	"errors"
 	"math/rand"
 	"strconv"
 	"sync"
 	"time"
 )
 
-// RoomMember 房间成员（轻量视图，仅含前端展示所需字段）
+// MaxRoomMembers 房间人数上限
+const MaxRoomMembers = 10
+
+// RoomMember 房间成员（轻量视图，含前端展示及网络判断所需字段）
 type RoomMember struct {
-	ID   string `json:"id"`
-	Name string `json:"name"`
+	ID         string `json:"id"`
+	Name       string `json:"name"`
+	IP         string `json:"ip,omitempty"`         // 公网出口 IP（用于同公网出口判定）
+	LocalLanIP string `json:"localLanIp,omitempty"` // 局域网 IP（用于同子网判定）
 }
 
 // Room 公网互传房间
@@ -35,10 +41,10 @@ func (r *Room) MemberList() []*RoomMember {
 }
 
 // AddMember 加入成员，返回是否成功（房间上限由调用方控制）
-func (r *Room) AddMember(id, name string) {
+func (r *Room) AddMember(id, name, ip, localLanIP string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	r.Members[id] = &RoomMember{ID: id, Name: name}
+	r.Members[id] = &RoomMember{ID: id, Name: name, IP: ip, LocalLanIP: localLanIP}
 }
 
 // RemoveMember 移除成员，返回移除后房间是否空了
@@ -79,7 +85,7 @@ func GetRoomManager() *RoomManager {
 }
 
 // CreateRoom 创建房间，返回房间与暗号
-func (m *RoomManager) CreateRoom(ownerID, ownerName string) *Room {
+func (m *RoomManager) CreateRoom(ownerID, ownerName, ip, localLanIP string) *Room {
 	code := m.newCode()
 	room := &Room{
 		ID:        generateRoomID(),
@@ -88,7 +94,7 @@ func (m *RoomManager) CreateRoom(ownerID, ownerName string) *Room {
 		Members:   make(map[string]*RoomMember),
 		CreatedAt: time.Now(),
 	}
-	room.AddMember(ownerID, ownerName)
+	room.AddMember(ownerID, ownerName, ip, localLanIP)
 
 	m.mu.Lock()
 	m.byID[room.ID] = room
@@ -97,16 +103,19 @@ func (m *RoomManager) CreateRoom(ownerID, ownerName string) *Room {
 	return room
 }
 
-// JoinRoom 通过暗号加入房间，返回房间与是否成功
-func (m *RoomManager) JoinRoom(code, deviceID, deviceName string) (*Room, bool) {
+// JoinRoom 通过暗号加入房间。返回房间，或 error（暗号不存在 / 房间已满）。
+func (m *RoomManager) JoinRoom(code, deviceID, deviceName, ip, localLanIP string) (*Room, error) {
 	m.mu.RLock()
 	room, ok := m.byCode[code]
 	m.mu.RUnlock()
 	if !ok {
-		return nil, false
+		return nil, errors.New("暗号错误或房间不存在")
 	}
-	room.AddMember(deviceID, deviceName)
-	return room, true
+	if len(room.Members) >= MaxRoomMembers {
+		return nil, errors.New("房间已满，最多 10 人")
+	}
+	room.AddMember(deviceID, deviceName, ip, localLanIP)
+	return room, nil
 }
 
 // LeaveRoom 离开房间（按 deviceID 查找其所在房间），返回所在房间（若有）

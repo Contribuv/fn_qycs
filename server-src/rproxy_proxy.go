@@ -123,7 +123,7 @@ func newReverseProxy(cfg ProxyConfig, logger *logManager) *reverseProxy {
 }
 
 // Start 启动反向代理
-// 监听指定端口，仅提供 HTTPS 访问（明文 HTTP 连接直接关闭，不重定向）
+// 监听指定端口，同端口支持 HTTPS + HTTP（HTTP 自动 301 重定向到 HTTPS）
 func (rp *reverseProxy) Start(domain string, port int, backendAddr, certPath, keyPath string) error {
 	// 新一轮启动时清空旧日志
 	rp.logger.clear()
@@ -241,7 +241,7 @@ func (rp *reverseProxy) Start(domain string, port int, backendAddr, certPath, ke
 	}
 
 	// 使用 TLS 嗅探 listener：同端口支持 HTTPS + HTTP（HTTP 自动 301 到 HTTPS）
-	rp.listener = newSniffListener(tcpLn, rp.tlsConfig)
+	rp.listener = newSniffListener(tcpLn, rp.tlsConfig, port)
 
 	rp.mu.Lock()
 	rp.running = true
@@ -255,7 +255,7 @@ func (rp *reverseProxy) Start(domain string, port int, backendAddr, certPath, ke
 
 	rp.logger.add("INFO", fmt.Sprintf("反向代理已启动: https://%s:%d", domain, port))
 	rp.logger.add("INFO", fmt.Sprintf("后端地址: %s", backendAddr))
-	rp.logger.add("INFO", "仅 HTTPS 访问（明文 HTTP 连接将被关闭）")
+	rp.logger.add("INFO", "HTTP 同端口自动 301 重定向到 HTTPS")
 	rp.logger.add("INFO", "========== 反代启动完成 ==========")
 
 	go func() {

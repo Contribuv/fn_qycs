@@ -55,6 +55,10 @@ func initGateway(backend string) {
 
 // ---- HTTP Handlers ----
 
+// 版本号，构建时通过 -ldflags -X 注入
+// 例如: go build -ldflags "-X main.appVersion=1.0.0"
+
+
 // handleGatewayPage 反代管理面板
 func handleGatewayPage(w http.ResponseWriter, r *http.Request) {
 	data := map[string]string{
@@ -63,7 +67,7 @@ func handleGatewayPage(w http.ResponseWriter, r *http.Request) {
 		"localIp":   getLocalIP(),
 		"localPort": parsePort(gatewayBackend),
 		"author":    "联系反馈 微信：CQGGTF",
-		"version":   "2.0.0",
+		"version":   appVersion,
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	if err := gatewayTmpl.Execute(w, data); err != nil {

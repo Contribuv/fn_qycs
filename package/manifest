@@ -1,5 +1,5 @@
 appname               = fn_qycs
-version               = 2.0.2
+version               = 2.0.7
 display_name          = 千盈传送
 desc                  = 临时救场，收发文件，一个网页搞定！<br><br>微信传不了？U 盘找不到？发个链接，对方浏览器打开就能收<br><br>局域网互传：同 WiFi / 同子网设备自动发现，点对点直传<br>跨公网互传：通过暗号房间，异地也能直传文件<br><br>基于 WebRTC P2P 技术，文件不经过服务器<br>受 WebRTC 数据通道限制，单文件最大 50MB<br><br>手机接收的图片/视频可直接保存到系统相册<br>iOS、Android、Windows、macOS 全平台支持<br><br>内置反向代理，搭配飞牛 DDNS 即可外网访问<br>主题跟随系统明暗自动切换
 platform              = all
@@ -16,4 +16,4 @@ maintainer            = 豪子
 maintainer_url        = https://github.com/Contribuv/fn_qycs
 distributor           = 豪子
 distributor_url       = https://github.com/Contribuv/fn_qycs
-changelog             = v2.0.2 - 修复稳定性问题，优化传输性能
+changelog             = v2.0.7 - 增加二维码功能，方便手机扫码进入房间

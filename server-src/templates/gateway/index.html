@@ -4,10 +4,19 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
 <title>{{.title}} · {{.appName}}</title>
-<link rel="stylesheet" href="/app/fn_qycs/gateway/static/css/gateway.css">
+<link rel="stylesheet" href="/app/fn_qycs/gateway/static/css/gateway.css?v={{.version}}">
 </head>
 <body>
 <script>
+// ===== 即时从 localStorage 恢复主题（不等 SDK 异步调用，消除白屏闪变）=====
+(function() {
+    try {
+        var t = localStorage.getItem('gw-theme');
+        if (t === 'dark' || t === 'light') {
+            document.documentElement.dataset.theme = t;
+        }
+    } catch(e) {}
+})();
 (function() {
     // 按官方文档要求：优先从飞牛 SDK 获取系统主题
     function applySysTheme(theme) {
@@ -16,18 +25,37 @@
         }
     }
 
+    // 【关键】在 SDK 就绪后立刻注册主题变化监听（先于任何异步调用）
+    // 确保能及时响应飞牛系统主题切换，避免事件窗口遗漏
+    function registerThemeListener() {
+        try {
+            if (typeof sdk !== 'undefined' && sdk.$on && sdk.isWeb === true && sdk.isStandaloneWeb === false) {
+                sdk.$on('os/theme', function(theme) {
+                    if (theme === 'dark' || theme === 'light') {
+                        document.documentElement.dataset.theme = theme;
+                        try { localStorage.setItem('gw-theme', theme); } catch(e) {}
+                        // 页面已加载完毕时同步更新主题图标
+                        if (typeof updateThemeIcon === 'function') updateThemeIcon(theme);
+                    }
+                });
+            }
+        } catch(e) {}
+    }
+
     if (typeof sdk !== 'undefined' && sdk.getPlatformConfig) {
-        // SDK 可用：按官方 API 获取系统主题
+        // SDK 可用：先注册监听，再获取当前主题
+        registerThemeListener();
         sdk.getPlatformConfig().then(function(config) {
             if (config && config.theme) applySysTheme(config.theme);
         }).catch(function() { fallbackLocal(); });
     } else {
-        // SDK 不可用（非宿主环境）：等待 SDK 注入或回退
+        // SDK 不可用（非宿主环境）：轮询等待 SDK 注入
         var attempts = 0;
         var check = setInterval(function() {
             attempts++;
             if (typeof sdk !== 'undefined' && sdk.getPlatformConfig) {
                 clearInterval(check);
+                registerThemeListener();
                 sdk.getPlatformConfig().then(function(config) {
                     if (config && config.theme) applySysTheme(config.theme);
                 }).catch(function() { fallbackLocal(); });
@@ -81,6 +109,20 @@
                     <line x1="16" y1="17" x2="8" y2="17"/>
                 </svg>
                 实时日志
+            </div>
+            <div class="mac-sidebar-item" onclick="switchSection('settings')">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <line x1="4" y1="21" x2="4" y2="14"/>
+                    <line x1="4" y1="10" x2="4" y2="3"/>
+                    <line x1="12" y1="21" x2="12" y2="12"/>
+                    <line x1="12" y1="8" x2="12" y2="3"/>
+                    <line x1="20" y1="21" x2="20" y2="16"/>
+                    <line x1="20" y1="12" x2="20" y2="3"/>
+                    <line x1="1" y1="14" x2="7" y2="14"/>
+                    <line x1="9" y1="8" x2="15" y2="8"/>
+                    <line x1="17" y1="16" x2="23" y2="16"/>
+                </svg>
+                传送设置
             </div>
             <div class="mac-sidebar-item" onclick="switchSection('help')">
                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
@@ -213,6 +255,77 @@
                 </div>
             </div>
 
+            <!-- 传送设置 -->
+            <div class="mac-section" id="section-settings">
+                <h2>
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="width:22px;height:22px;vertical-align:-4px;margin-right:6px">
+                        <line x1="4" y1="21" x2="4" y2="14"/><line x1="4" y1="10" x2="4" y2="3"/>
+                        <line x1="12" y1="21" x2="12" y2="12"/><line x1="12" y1="8" x2="12" y2="3"/>
+                        <line x1="20" y1="21" x2="20" y2="16"/><line x1="20" y1="12" x2="20" y2="3"/>
+                        <line x1="1" y1="14" x2="7" y2="14"/><line x1="9" y1="8" x2="15" y2="8"/><line x1="17" y1="16" x2="23" y2="16"/>
+                    </svg>
+                    传送设置
+                </h2>
+                <p class="mac-hint">配置 STUN/TURN 服务器以改善 NAT 穿透；未配置 TURN/TURNS 则不支持中继穿透。</p>
+                <div class="settings-scroll-area">
+                <div class="form-group">
+                    <label class="form-label">文件大小限制 (MB)</label>
+                    <input type="number" class="form-input" id="maxFileSize" value="50" min="1" max="99999" style="width:160px">
+                    <div class="form-help">超大文件传输受超时限制，建议不超过 500 MB。</div>
+                </div>
+                <div class="form-group">
+                    <label class="form-label">STUN 服务器</label>
+                    <input type="text" class="form-input monospace" id="stunServer" placeholder="stun:stun.l.google.com:19302">
+                    <div class="form-help">多个地址用英文逗号分隔，默认使用 Google 公共 STUN 服务。</div>
+                </div>
+                <div class="settings-separator">
+                    <span style="font-weight:600;color:var(--gw-text-primary)">TURN 中继服务器（可选）</span>
+                    <div class="settings-separator-hint">配置后可提升对称型 NAT / 严格防火墙下的穿透成功率。</div>
+                </div>
+                <div class="form-group">
+                    <label class="form-label">TURN 地址</label>
+                    <input type="text" class="form-input monospace" id="turnServer" placeholder="turn:your-turn-server.com:3478">
+                    <div class="form-help">格式：<code style="background:var(--gw-card-bg);padding:1px 5px;border-radius:3px">turn:host:port</code>，多个地址逗号分隔。支持 UDP/TCP。</div>
+                </div>
+                <div class="form-row-2">
+                    <div class="form-group">
+                        <label class="form-label">TURN 用户名</label>
+                        <input type="text" class="form-input" id="turnUsername" placeholder="用户名（选填）">
+                    </div>
+                    <div class="form-group">
+                        <label class="form-label">TURN 密码</label>
+                        <input type="password" class="form-input" id="turnPassword" placeholder="密码（选填）">
+                    </div>
+                </div>
+                <div class="settings-separator">
+                    <span style="font-weight:600;color:var(--gw-text-primary)">TURNS (TLS) 中继服务器（可选）</span>
+                    <div class="settings-separator-hint">TURN over TLS，提供加密传输，安全性更高。</div>
+                </div>
+                <div class="form-group">
+                    <label class="form-label">TURNS 地址</label>
+                    <input type="text" class="form-input monospace" id="turnsServer" placeholder="turns:your-turn-server.com:5349">
+                    <div class="form-help">格式：<code style="background:var(--gw-card-bg);padding:1px 5px;border-radius:3px">turns:host:port</code>，多个地址逗号分隔。仅 TLS 连接。</div>
+                </div>
+                <div class="form-row-2">
+                    <div class="form-group">
+                        <label class="form-label">TURNS 用户名</label>
+                        <input type="text" class="form-input" id="turnsUsername" placeholder="用户名（选填）">
+                    </div>
+                    <div class="form-group">
+                        <label class="form-label">TURNS 密码</label>
+                        <input type="password" class="form-input" id="turnsPassword" placeholder="密码（选填）">
+                    </div>
+                </div>
+                </div>
+                <div class="settings-info-tip">
+                    自建 TURN 服务器？推荐开源项目 <a href="https://gitee.com/scpro/coturn" target="_blank" rel="noopener">gitee.com/scpro/coturn</a>，部署后填入上方地址即可提升穿透成功率。
+                </div>
+                <div class="form-actions settings-sticky">
+                    <button class="mac-btn-primary" onclick="saveSettings()">保存</button>
+                    <span id="settingsMsg"></span>
+                </div>
+            </div>
+
             <div class="mac-section" id="section-help">
                 <h2>
                     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
@@ -251,12 +364,12 @@
 function switchSection(name) {
     document.querySelectorAll('.mac-section').forEach(s => s.classList.remove('active'));
     const items = document.querySelectorAll('.mac-sidebar-item');
-    for (var i = 0; i < 4 && i < items.length; i++) {
+    for (var i = 0; i < 5 && i < items.length; i++) {
         items[i].classList.remove('active');
     }
     const section = document.getElementById('section-' + name);
     if (section) section.classList.add('active');
-    const map = ['status', 'config', 'logs', 'help'];
+    const map = ['status', 'config', 'logs', 'settings', 'help'];
     const idx = map.indexOf(name);
     if (idx >= 0 && items[idx]) items[idx].classList.add('active');
 }
@@ -310,24 +423,18 @@ function applySystemTheme(theme) {
 }
 
 function initThemeListener() {
+    // 主题监听已在 <head> 内联脚本中提前注册（先于 SDK.getPlatformConfig）
+    // 这里仅做图标同步 + 兜底获取（头脚本瞬间 SDK 可能尚未注入）
+    var currentTheme = document.documentElement.getAttribute('data-theme') || 'light';
+    updateThemeIcon(currentTheme);
+    // 兜底：如果 head 脚本执行时 SDK 未就绪，这里再获取一次确保一致
     try {
         if (typeof sdk !== 'undefined' && sdk.getPlatformConfig) {
-            // 官方文档要求：先通过 getPlatformConfig 获取当前主题
             sdk.getPlatformConfig().then(function(config) {
-                if (config && config.theme) {
-                    applySystemTheme(config.theme);
-                }
+                if (config && config.theme) applySystemTheme(config.theme);
             }).catch(function() {});
-
-            // 官方文档要求：仅在 Web 宿主环境监听 os/theme 变化
-            if (sdk.$on && sdk.isWeb === true && sdk.isStandaloneWeb === false) {
-                sdk.$on('os/theme', function(theme) {
-                    // 回调直接传入 'dark' 或 'light' 字符串
-                    applySystemTheme(theme);
-                });
-            }
         }
-    } catch (e) {}
+    } catch(e) {}
 }
 
 let polling = false;
@@ -636,6 +743,63 @@ function copyWeChat() {
         setTimeout(() => { copied.style.display = 'none'; }, 2000);
     });
 }
+
+// ===== 传送设置 =====
+
+async function loadSettings() {
+    try {
+        const res = await fetch(apiPath('/api/settings')).then(r => r.json());
+        document.getElementById('maxFileSize').value = res.max_file_size_mb || 50;
+        document.getElementById('stunServer').value = res.stun_server || '';
+        document.getElementById('turnServer').value = res.turn_server || '';
+        document.getElementById('turnUsername').value = res.turn_username || '';
+        document.getElementById('turnPassword').value = res.turn_password || '';
+        document.getElementById('turnsServer').value = res.turns_server || '';
+        document.getElementById('turnsUsername').value = res.turns_username || '';
+        document.getElementById('turnsPassword').value = res.turns_password || '';
+    } catch (e) {
+        console.error('加载设置失败:', e);
+    }
+}
+
+async function saveSettings() {
+    const msg = document.getElementById('settingsMsg');
+    msg.className = '';
+    msg.textContent = '';
+    const data = {
+        max_file_size_mb: parseInt(document.getElementById('maxFileSize').value) || 50,
+        stun_server: document.getElementById('stunServer').value.trim(),
+        turn_server: document.getElementById('turnServer').value.trim(),
+        turn_username: document.getElementById('turnUsername').value.trim(),
+        turn_password: document.getElementById('turnPassword').value,
+        turns_server: document.getElementById('turnsServer').value.trim(),
+        turns_username: document.getElementById('turnsUsername').value.trim(),
+        turns_password: document.getElementById('turnsPassword').value
+    };
+    try {
+        const res = await fetch(apiPath('/api/settings'), {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(data)
+        }).then(r => r.json());
+        if (res.success) {
+            msg.className = 'status-success';
+            msg.textContent = '✓ 保存成功';
+            setTimeout(() => { msg.textContent = ''; msg.className = ''; }, 3000);
+        } else {
+            msg.className = 'status-error';
+            msg.textContent = '✗ ' + (res.error || '保存失败');
+        }
+    } catch (e) {
+        msg.className = 'status-error';
+        msg.textContent = '✗ 保存失败: ' + e.message;
+    }
+}
+
+// 初次打开设置页面时加载
+document.addEventListener('DOMContentLoaded', function() {
+    loadSettings();
+});
 </script>
 </body>
 </html>

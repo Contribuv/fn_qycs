@@ -1,9 +1,11 @@
 package main
 
 import (
+	"bytes"
 	"embed"
 	"encoding/json"
 	"fmt"
+	"html/template"
 	"io"
 	"log"
 	"net"
@@ -21,6 +23,12 @@ import (
 
 //go:embed static/*
 var staticFiles embed.FS
+
+// 应用版本号，构建时通过 -ldflags "-X main.appVersion=$version" 注入
+var appVersion = "dev"
+
+// 首页模板缓存
+var indexTmpl *template.Template
 
 func main() {
 	// ====== 初始化文件日志 ======
@@ -49,6 +57,10 @@ func main() {
 	// 公网 WebRTC ICE 服务器列表（v2.0.1 房间系统需要）
 	mux.HandleFunc("/api/ice-servers", handler.HandleIceServers)
 
+	// 传送设置 API
+	mux.HandleFunc("/api/settings", handler.HandleSettings)
+	mux.HandleFunc("/api/max-file-size", handler.HandleMaxFileSize)
+
 	// 文件下载路由
 	mux.HandleFunc("/download/", handler.GetDownloadHandler().HandleDownload)
 
@@ -58,6 +70,13 @@ func main() {
 	// === 反代管理面板（单进程内嵌，无需子进程）===
 	backend := fmt.Sprintf("http://127.0.0.1:%s", getBackendPort())
 	initGateway(backend)
+
+	// 解析首页模板（缓存以支持版本号动态注入）
+	if tmpl, err := template.ParseFS(staticFiles, "static/index.html"); err != nil {
+		mainLogger("ERROR", fmt.Sprintf("首页模板解析失败: %v", err))
+	} else {
+		indexTmpl = tmpl
+	}
 
 	// 反代日志持久化到文件
 	if err := gatewayLogger.SetLogFile(logDir); err != nil {
@@ -72,6 +91,8 @@ func main() {
 	mux.HandleFunc("/gateway/api/certs", apiCerts)
 	mux.HandleFunc("/gateway/api/logs", apiLogs)
 	mux.HandleFunc("/gateway/api/check-port", apiCheckPort)
+	mux.HandleFunc("/gateway/api/settings", handler.HandleSettings)
+	mux.HandleFunc("/gateway/api/max-file-size", handler.HandleMaxFileSize)
 	mux.HandleFunc("/gateway/api/start", apiStart)
 	mux.HandleFunc("/gateway/api/stop", apiStop)
 	mux.HandleFunc("/gateway/static/css/gateway.css", handleGatewayCSS)
@@ -86,7 +107,7 @@ func main() {
 	}
 	addr := ":" + port
 
-	server := &http.Server{Handler: mux}
+	server := &http.Server{Handler: tcpGatewayGuard(mux)}
 
 	// TCP 监听
 	tcpListener, err := net.Listen("tcp", addr)
@@ -225,17 +246,40 @@ func createSocketListener(sockPath string, handler http.Handler) {
 
 // ---- 静态文件服务 ----
 
+// tcpGatewayGuard 拦截 TCP 端口对 /gateway 管理面板的访问，
+// 确保 gateway 仅能通过飞牛统一网关（Unix Socket）访问。
+func tcpGatewayGuard(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasPrefix(r.URL.Path, "/gateway") {
+			http.NotFound(w, r)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
 func serveIndex(w http.ResponseWriter, r *http.Request) {
 	path := r.URL.Path
 
 	// 传输页面根
 	if path == "/" {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		if indexTmpl != nil {
+			var buf bytes.Buffer
+			data := map[string]string{
+				"version": appVersion,
+			}
+			if err := indexTmpl.Execute(&buf, data); err == nil {
+				w.Write(buf.Bytes())
+				return
+			}
+			mainLogger("WARN", "首页模板渲染失败，回退原始HTML")
+		}
 		data, err := staticFiles.ReadFile("static/index.html")
 		if err != nil {
 			http.ServeFile(w, r, "static/index.html")
 			return
 		}
-		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		w.Write(data)
 		return
 	}

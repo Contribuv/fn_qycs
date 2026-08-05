@@ -4,7 +4,8 @@ import (
 	"encoding/json"
 	"log"
 	"net/http"
-	"os"
+
+	"fn_qycs/service"
 )
 
 // ICEServer ICE 服务器配置
@@ -20,27 +21,47 @@ type IceServersResponse struct {
 }
 
 // HandleIceServers 返回公网 WebRTC 可用的 ICE 服务器列表
-// 默认包含公共 STUN；若配置了 TURN（环境变量），则追加 TURN 中继，
-// 提升对称型 NAT / 严格防火墙下的穿透成功率。
+// 从传送设置中读取 STUN / TURN / TURNS 配置；
+// 未配置 TURN/TURNS 则不启用中继穿透。
 func HandleIceServers(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
 
-	servers := []ICEServer{
-		{URLs: []string{"stun:stun.l.google.com:19302"}},
-		{URLs: []string{"stun:stun1.l.google.com:19302"}},
+	settings := service.LoadSettings()
+	servers := []ICEServer{}
+
+	// STUN 服务器
+	if settings.StunServer != "" {
+		servers = append(servers, ICEServer{URLs: splitAndTrim(settings.StunServer)})
 	}
 
-	// 可选 TURN 配置（环境变量 TURN_URLS，逗号分隔；TURN_USERNAME / TURN_CREDENTIAL）
-	if turnURLs := os.Getenv("TURN_URLS"); turnURLs != "" {
-		turn := ICEServer{
-			URLs:       splitAndTrim(turnURLs),
-			Username:   os.Getenv("TURN_USERNAME"),
-			Credential: os.Getenv("TURN_CREDENTIAL"),
+	// TURN 中继（配置了才启用）
+	if settings.TurnServer != "" {
+		turn := ICEServer{URLs: splitAndTrim(settings.TurnServer)}
+		if settings.TurnUsername != "" {
+			turn.Username = settings.TurnUsername
+			turn.Credential = settings.TurnPassword
 		}
 		servers = append(servers, turn)
+	}
+
+	// TURNS (TLS) 中继（配置了才启用）
+	if settings.TurnsServer != "" {
+		turns := ICEServer{URLs: splitAndTrim(settings.TurnsServer)}
+		if settings.TurnsUsername != "" {
+			turns.Username = settings.TurnsUsername
+			turns.Credential = settings.TurnsPassword
+		}
+		servers = append(servers, turns)
+	}
+
+	// 兜底：无任何配置时返回默认 Google STUN
+	if len(servers) == 0 {
+		servers = append(servers, ICEServer{
+			URLs: []string{"stun:stun.l.google.com:19302", "stun:stun1.l.google.com:19302"},
+		})
 	}
 
 	resp := IceServersResponse{IceServers: servers}

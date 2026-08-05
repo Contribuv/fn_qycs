@@ -1,6 +1,6 @@
 // ===== 传送 =====
 
-const VERSION = '2.0.2';
+const VERSION = '2.0.7';
 
 const App = {
     ws: null,
@@ -21,6 +21,7 @@ const App = {
     _idb: null,
     _dbReady: null,
     _iceServers: null,
+    _maxFileSizeMB: 50,   // 默认 50MB，由 /api/max-file-size 动态更新
     _room: null,       // { id, code, ownerId, devices: Map }
     _roomDevices: new Map(),  // 房间内设备（跨网络互传）
     _deviceView: 'lan',  // 设备列表视图：'lan' 局域网 | 'room' 房间
@@ -36,15 +37,16 @@ const App = {
         this.deviceName = localStorage.getItem('yuanbaba_name') || '';
         this.mode = localStorage.getItem('yuanbaba_mode') || 'send';
         this._everConnected = false;  // 用于判断是否局域网被拒
-        // 微信浏览器检测：仅允许发送，接收 tab 显示不支持提示
+        // 微信浏览器检测：显示顶部提醒，但不禁用接收功能
         this.isWechat = /micromessenger/i.test(navigator.userAgent);
-        if (this.isWechat && this.mode === 'recv') this.mode = 'send';
         this.applyTheme();
         this.bindEvents();
         this.connect();
         this.loadHistory();
         // 进入页面即触发网络能力探测（此前仅在发起传输时才间接触发，导致一直显示"正在检测"）
         this.fetchIceServers().catch(() => {});
+        // 获取最大文件大小限制
+        this.fetchMaxFileSize().catch(() => {});
         // 恢复上次的 tab
         document.querySelectorAll('.tab').forEach(t => t.classList.toggle('active', t.dataset.mode === this.mode));
         this.$('sendPanel').classList.toggle('hidden', this.mode !== 'send');
@@ -61,6 +63,21 @@ const App = {
                 this.requestWakeLock();
             }
         });
+        // 生成初始二维码（页面 URL）
+        this.updateQRCode();
+        // tabs 动态对齐 main 容器中心（CSS 计算不可靠）
+        this._syncTabsCenter();
+        window.addEventListener('resize', () => this._syncTabsCenter());
+    },
+
+    // 同步 header-tabs 位置对齐 main 容器水平中心
+    _syncTabsCenter() {
+        const tabs = document.querySelector('.header-tabs');
+        const main = document.querySelector('.main');
+        if (tabs && main) {
+            const r = main.getBoundingClientRect();
+            tabs.style.left = (r.left + r.width / 2) + 'px';
+        }
     },
 
     // ===== IndexedDB 持久化（流式分片存储，避免大文件内存溢出）=====
@@ -100,6 +117,25 @@ const App = {
         return this._iceServers;
     },
 
+    async fetchMaxFileSize() {
+        const tryUrls = ['api/max-file-size', '/api/max-file-size'];
+        for (const u of tryUrls) {
+            try {
+                const res = await fetch(u);
+                if (res.ok) {
+                    const data = await res.json();
+                    if (data && data.max_file_size_mb > 0) {
+                        this._maxFileSizeMB = data.max_file_size_mb;
+                        // 更新页面显示
+                        const el = document.getElementById('maxSizeDisplay');
+                        if (el) el.textContent = data.max_file_size_mb;
+                        return;
+                    }
+                }
+            } catch { /* 尝试下一个候选路径 */ }
+        }
+    },
+
     async dbPut(record) {
         try {
             await this.initDB();
@@ -127,16 +163,15 @@ const App = {
     // 格式化 IP 地址：IPv6 显示为空，内网 IPv4 正常显示
     formatIP(ip) {
         if (!ip) return '';
-        // 检测是否为内网 IPv4
-        if (/^(127\.|^10\.|^172\.(1[6-9]|2\d|3[01])\.|^192\.168\.)/.test(ip)) {
-            return ip;
-        }
-        // 纯 IPv4 也显示
-        if (/^\d+\.\d+\.\d+\.\d+$/.test(ip)) {
-            return ip;
-        }
-        // IPv6 不显示（太长了没意义）
+        if (/^(127\.|^10\.|^172\.(1[6-9]|2\d|3[01])\.|^192\.168\.)/.test(ip)) return ip;
+        if (/^\d+\.\d+\.\d+\.\d+$/.test(ip)) return ip;
         return '';
+    },
+
+    // 设备卡片展示 IP：优先显示前端探测到的私网 IP（同局域网用户可直观确认网段）
+    deviceDisplayIP(d) {
+        if (d.localLanIp && d.localLanIp !== d.ip) return d.localLanIp;
+        return this.formatIP(d.ip);
     },
 
     async dbAll() {
@@ -214,7 +249,8 @@ const App = {
                 status: 'saved',
                 mime: r.mime,
                 blobUrl: null,
-                savedToDisk: r.savedToDisk || false
+                savedToDisk: r.savedToDisk || false,
+                chunkCount: r.chunkCount || 0
             })).sort((a, b) => new Date(b.time) - new Date(a.time));
             console.log('[历史恢复] 恢复后 receiveHistory:', this.receiveHistory);
             this.renderReceiveList();
@@ -347,14 +383,13 @@ const App = {
         this.updateRecvNotice();
     },
 
-    // 微信浏览器在接收 tab 显示不支持提示，隐藏正常接收内容
+    // 微信浏览器在接收 tab 显示顶部提醒，但不隐藏接收功能
     updateRecvNotice() {
         const notice = this.$('wechatNotice');
         if (!notice) return;
         const showNotice = this.isWechat && this.mode === 'recv';
         notice.classList.toggle('hidden', !showNotice);
-        this.$('recvHero').classList.toggle('hidden', showNotice);
-        this.$('recvPanel').querySelector('.section').classList.toggle('hidden', showNotice);
+        // 不再隐藏 recvHero 和 section，接收功能完整可用
     },
 
     // ===== 跨网络互传 =====
@@ -413,15 +448,30 @@ const App = {
     },
 
     joinRoom() {
+        if (this._roomJoining) { this.toast('正在加入房间，请稍候', 'info'); return; }
         // 去除空格与常见分隔符，允许用户输入 "12 34 56" 这类带空格的暗号
         const code = this.$('roomCodeInput').value.replace(/[\s-]/g, '');
         if (!code || code.length !== 6 || !/^\d{6}$/.test(code)) { this.toast('请输入 6 位数字暗号', 'info'); return; }
         console.log('[Room] 加入房间, 暗号:', code, 'deviceId:', this.deviceId);
+        this._roomJoining = true;
         this.send({ type: 'room_join', payload: { code } });
         this.toast('正在加入房间…', 'info');
+        // 5秒超时兜底
+        if (this._roomJoinTimer) clearTimeout(this._roomJoinTimer);
+        this._roomJoinTimer = setTimeout(() => {
+            if (this._roomJoining) {
+                this._roomJoining = false;
+                this.toast('加入房间超时，请确认暗号后重试', 'error');
+            }
+        }, 5000);
     },
 
     leaveRoom() {
+        this._roomCreating = false;
+        this._roomJoining = false;
+        if (this._roomCreateTimer) { clearTimeout(this._roomCreateTimer); this._roomCreateTimer = null; }
+        if (this._roomJoinTimer) { clearTimeout(this._roomJoinTimer); this._roomJoinTimer = null; }
+        if (this._autoJoinDelay) { clearTimeout(this._autoJoinDelay); this._autoJoinDelay = null; }
         this.send({ type: 'room_leave' });
         this._room = null;
         this._roomDevices.clear();
@@ -458,11 +508,17 @@ const App = {
         this.renderRoomState();
         this._deviceView = 'room';
         this.renderDevices();
+        // 移动端 DOM 操作后可能隐式滚动到房间区域，强制回到顶部
+        window.scrollTo({ top: 0, behavior: 'instant' });
+        this.updateQRCode();
         this.toast(`房间已创建，暗号：${payload.code}`, 'success');
     },
 
     onRoomJoined(payload) {
         console.log('[Room] 已加入房间:', payload);
+        this._roomJoining = false;
+        if (this._roomJoinTimer) { clearTimeout(this._roomJoinTimer); this._roomJoinTimer = null; }
+        if (this._autoJoinDelay) { clearTimeout(this._autoJoinDelay); this._autoJoinDelay = null; }
         this._room = { id: payload.roomId, code: payload.code, ownerId: payload.ownerId };
         this._roomDevices.clear();
         if (payload.devices) {
@@ -471,6 +527,9 @@ const App = {
         this.renderRoomState();
         this._deviceView = 'room';
         this.renderDevices();
+        // 移动端 DOM 操作后可能隐式滚动到房间区域，强制回到顶部
+        window.scrollTo({ top: 0, behavior: 'instant' });
+        this.updateQRCode();
         this.toast('加入房间成功', 'success');
     },
 
@@ -480,6 +539,7 @@ const App = {
         this._deviceView = 'lan';
         this.renderRoomState();
         this.renderDevices();
+        this.updateQRCode();
         this.toast('已离开房间', 'info');
     },
 
@@ -521,6 +581,7 @@ const App = {
             this.renderRoomState();
             this._deviceView = 'room';
             this.renderDevices();
+            this.updateQRCode();
         } else {
             // 仅当本地确实未处于房间时才回落到局域网模式。
             // 防止重连/初始化竞态：后端 GetRoomByDevice 偶发未及时同步返回 inRoom:false，
@@ -536,7 +597,10 @@ const App = {
 
     onRoomError(payload) {
         this._roomCreating = false;
+        this._roomJoining = false;
         if (this._roomCreateTimer) { clearTimeout(this._roomCreateTimer); this._roomCreateTimer = null; }
+        if (this._roomJoinTimer) { clearTimeout(this._roomJoinTimer); this._roomJoinTimer = null; }
+        if (this._autoJoinDelay) { clearTimeout(this._autoJoinDelay); this._autoJoinDelay = null; }
         console.error('[Room] 房间操作失败:', payload);
         // 修复：后端发送的是 message 字段，不是 error 字段
         this.toast(payload?.message || payload?.error || '房间操作失败', 'error');
@@ -553,6 +617,7 @@ const App = {
         let hasPublicV4 = false;
         let hasStunPublic = false;
         let localLanIp = ''; // 本机局域网 IP（用于同用户子网判定：热点/WiFi 直连）
+        let srflx4 = ''; // mDNS 兜底：STUN 反射的出口 IPv4
         const isPrivateV4 = (addr) => {
             return addr.startsWith('10.') ||
                 addr.startsWith('192.168.') ||
@@ -580,16 +645,25 @@ const App = {
                     if (!e.candidate) return;
                     const c = e.candidate.candidate || '';
                     if (c.includes('typ host')) {
-                        const m = c.match(/candidate:\S+ \d+ \S+ \d+ (\S+)/);
-                        const addr = m ? m[1] : '';
+                        let addr = (e.candidate.address || '').toLowerCase();
+                        if (!addr) {
+                            const m = c.match(/(?:candidate:)?\S+ \d+ \S+ \d+ (\S+)/);
+                            if (m) addr = m[1];
+                        }
                         if (isPublicV6(addr)) hasV6 = true;
                         else if (isPublicV4(addr)) hasPublicV4 = true;
-                        // 记录私网主机候选作为本机局域网 IP（如 192.168.43.1 热点）
                         else if (addr && isPrivateV4(addr) && !addr.startsWith('169.254.')) {
                             if (!localLanIp) localLanIp = addr;
                         }
                     }
-                    if (c.includes('typ srflx') || c.includes('typ relay')) hasStunPublic = true;
+                    if (c.includes('typ srflx')) {
+                        hasStunPublic = true;
+                        if (!srflx4) {
+                            const m = c.match(/(?:candidate:)?\S+ \d+ \S+ \d+ (\d+\.\d+\.\d+\.\d+)/);
+                            if (m) srflx4 = m[1];
+                        }
+                    }
+                    if (c.includes('typ relay')) hasStunPublic = true;
                 };
                 pc.onicegatheringstatechange = () => { if (pc.iceGatheringState === 'complete') { clearTimeout(to); resolve(); } };
             });
@@ -615,18 +689,28 @@ const App = {
             level = 'ok';
             msg = '已配置 TURN 中继，可跨网互传';
         } else {
-            // 仅有私有 IPv4 且无 TURN：跨网需要双方都在同一房间且能打洞，否则不支持
+            // v2.0.6：无公网IP、无TURN中继。STUN穿透仅在全锥形NAT下可成功，对称NAT必然失败。
             level = 'warn';
-            msg = '需STUN中继不支持互传';
+            msg = '未配置 TURN 中继，跨网穿透可能失败';
         }
         box.dataset.level = level;
         text.textContent = msg;
 
         // 上报本机局域网 IP 给服务器：用于"同用户子网"判定（连同一热点/WiFi 即互见直连）
+        // mDNS 兜底：移动端浏览器 host candidate 被混淆为 .local 域名，改用 STUN 出口 IP
+        if (!localLanIp && srflx4) localLanIp = srflx4;
         if (localLanIp) {
             this._localLanIp = localLanIp;
             this.send({ type: 'report_lan', payload: { lanIp: localLanIp } });
         }
+
+        // 保存探测结果供设备选择时回写
+        this._natHasTurn = hasTurn;
+        this._natHasV6 = hasV6;
+        this._natHasPublicV4 = hasPublicV4;
+        this._natHasStunPublic = hasStunPublic;
+        this._netCapLevel = level;
+        this._netCapMsg = msg;
     },
 
     // 真实连接结果回写网络能力提示
@@ -638,8 +722,46 @@ const App = {
             box.dataset.level = 'ok';
             text.textContent = viaTurn ? '已通过 TURN 中继完成跨网传输' : '已成功跨网传输（直连）';
         } else {
-            box.dataset.level = 'warn';
-            text.textContent = '本次跨网连接失败：可能 NAT 不可穿透，建议配置 TURN 中继';
+            box.dataset.level = 'error';
+            text.textContent = this._natHasTurn
+                ? '本次跨网连接失败：NAT 穿透不可用'
+                : '未配置 TURN 中继，本次跨网连接失败';
+        }
+    },
+
+    // 生成/更新 PC 端右侧二维码
+    updateQRCode() {
+        const img = this.$('qrImg');
+        const desc = this.$('qrDesc');
+        if (!img || !desc) return;
+        if (typeof qrcode === 'undefined') return;
+
+        // 构造 URL：当前页面地址，若在房间中附加暗号
+        let url = location.origin + location.pathname;
+        if (this._room && this._room.code) {
+            url += '?code=' + this._room.code;
+            desc.textContent = '扫码加入房间 ' + this._room.code;
+        } else {
+            desc.textContent = '手机上打开此页面，即可互传文件';
+        }
+
+        try {
+            const qr = qrcode(0, 'L');
+            qr.addData(url);
+            qr.make();
+            // 根据主题切换 QR 配色
+            const isDark = document.documentElement.getAttribute('data-theme') === 'dark';
+            // 浅色主题：白底 + 页面文字色模块；深色主题：深色底 + 浅灰模块
+            const bg = isDark ? '#1e2024' : '#ffffff';
+            const fg = isDark ? '#d1d5db' : '#374151';
+            const svg = qr.createSvgTag(4, 2);
+            // 替换前景色（模块）和背景色
+            const colored = svg
+                .replace(/#000000|black/g, fg)
+                .replace(/fill:\s*white|fill="white"/g, 'fill="' + bg + '"');
+            img.src = 'data:image/svg+xml,' + encodeURIComponent(colored);
+        } catch (e) {
+            console.warn('[QR] 生成失败:', e);
         }
     },
 
@@ -672,7 +794,7 @@ const App = {
 
         try {
             const dcReady = new Promise((resolve, reject) => {
-                dc.onopen = () => { this._startDcHeartbeat(dc); resolve(); };
+                dc.onopen = () => { this._startDcHeartbeat(dc); if (this._lastViaTurn !== undefined) this.setNetCapResult(true, this._lastViaTurn); resolve(); };
                 dc.onerror = () => reject(new Error('连接失败'));
                 setTimeout(() => reject(new Error('连接建立超时（45s），网络可能受限')), 45000);
             });
@@ -868,7 +990,7 @@ const App = {
                 // 同时请求最新设备列表（持续发现新设备）
                 this.send({ type: 'request_device_list' });
             }
-        }, 5000);
+        }, 20000); // 每 20 秒发送心跳（服务端超时 45s）
     },
     stopHeartbeat() { if (this.heartbeatTimer) { clearInterval(this.heartbeatTimer); this.heartbeatTimer = null; } },
 
@@ -934,6 +1056,7 @@ const App = {
             this.toast('昵称「' + (payload.device?.name || '') + '」已被占用，已自动改为「' + payload.finalName + '」', 'info');
         }
         this.$('selfName').textContent = this.deviceName || '未命名';
+        this._myIP = payload.device?.ip || '';
         this.updateStatus('connected');
         // 连接建立后立即拉取一次设备列表，避免等到首个心跳才看到附近设备
         this.send({ type: 'request_device_list' });
@@ -941,34 +1064,72 @@ const App = {
         this._modeDetermined = false;
         // 刷新后若仍在房间，恢复房间态（后端持久保存房间，重连仍在原房间）
         this.send({ type: 'room_list' });
+        // 扫码加入房间：URL 中带了 ?code=XXXXXX 参数，自动加入
+        const params = new URLSearchParams(location.search);
+        const urlCode = params.get('code');
+        if (urlCode && /^\d{6}$/.test(urlCode)) {
+            console.log('[Room] 检测到 URL 暗号:', urlCode, '当前房间态:', !!this._room);
+            // 已在房间中则跳过（可能是重连恢复）
+            if (this._room) return;
+            // 自动填入暗号
+            this.$('roomCodeInput').value = urlCode;
+            // 自动展开房间面板
+            const body = this.$('roomBody');
+            if (body && body.classList.contains('hidden')) this.expandRoomCollapse();
+            // 清除旧定时器，重新设置（WS 每次重连都重新尝试，确保最终能加入）
+            if (this._autoJoinDelay) clearTimeout(this._autoJoinDelay);
+            this._autoJoinDelay = setTimeout(() => {
+                if (!this._room && !this._roomJoining) {
+                    // 重新写入暗号（onRoomInfo → renderRoomState 可能已清空 input）
+                    this.$('roomCodeInput').value = urlCode;
+                    console.log('[Room] 开始自动加入房间:', urlCode);
+                    this.joinRoom();
+                }
+            }, 1500);
+        }
     },
 
     // 公网受限模式：服务器判定当前客户端非局域网，不发现局域网设备。
     // 自动切换至房间 tab，引导用户通过暗号房间互传。
+    //
+    // v2.0.6 修复：不再立即清空 devices 和强制切换视图。
+    // 公网反代部署场景下，后端已启动多轮重试等待 LocalLanIP 上报，
+    // 若 5 秒内收到 device_list 或 device_online，则自动反转为局域网模式。
     onLanOnly(payload) {
         const firstTime = !this._modeDetermined;
-        this._isPublicMode = true;
         this._modeDetermined = true;
         if (firstTime) {
-            // 清空局域网设备列表（避免残留旧数据）
-            this.devices.clear();
-            // 强制切到房间 tab，避免停留在局域网 tab 显示重复提示
-            this._deviceView = 'room';
-            // 自动展开跨网络互传折叠面板，引导用户使用房间
-            this.expandRoomCollapse();
-            // 若尚未进入房间，提示用户（仅首次，避免 request_device_list / report_lan 重复弹出）
-            if (!this._room) {
-                this.toast('当前公网模式，请使用跨网络互传（暗号房间）进行传输', 'info');
-            }
+            // 仅标记等待状态，不立即清空列表也不强制切换视图
+            this._isPublicMode = true;
+            this.$('statusText').textContent = '公网模式';
+            // 启动 5 秒宽容窗口：在此期间若收到 device_online 或 device_list，会由对应处理函数反转
+            this._lanOnlyRecoveryTimer = setTimeout(() => {
+                this._lanOnlyRecoveryTimer = null;
+                // 宽容期结束，确认仍为公网模式，此时才清空列表并引导房间
+                if (this._isPublicMode && !this._room) {
+                    this.devices.clear();
+                    this._deviceView = 'room';
+                    this.expandRoomCollapse();
+                    this.toast('当前公网模式，请使用跨网络互传（暗号房间）进行传输', 'info');
+                    this.renderDevices();
+                }
+            }, 5000);
         }
-        // 每次均更新状态栏（重连场景保持 UI 一致）
+        // 非首次不覆盖 _isPublicMode / statusText，避免覆盖 report_lan 维度2 恢复的局域网状态
         this.updateStatus('connected');
-        this.$('statusText').textContent = '公网模式';
-        this.renderDevices();
+        // 不在首次立即 renderDevices，让宽容期窗口保持设备列表
+        if (!firstTime) {
+            this.renderDevices();
+        }
     },
 
     onDeviceList(devices) {
         const list = devices || [];
+        // v2.0.6：收到 device_list 时取消 lan_only 宽容期定时器
+        if (this._lanOnlyRecoveryTimer) {
+            clearTimeout(this._lanOnlyRecoveryTimer);
+            this._lanOnlyRecoveryTimer = null;
+        }
         // 仅在首次模式判断时更新 _isPublicMode，防止 report_lan 的 device_list 响应误翻转
         if (!this._modeDetermined) {
             this._isPublicMode = false;
@@ -994,6 +1155,10 @@ const App = {
                     this.devices.set(d.id, d);
                 } else {
                     newIds.add(d.id);
+                    // v2.0.7：房间成员被同网络发现，提示可直接局域网互传（无需走房间）
+                    if (d.matchType && (d.matchType === 'local_lan' || d.matchType === 'same_public_ip')) {
+                        this.toast(`${d.name} 与你在同一网络，退出房间可直连更快`, 'info');
+                    }
                 }
             }
         });
@@ -1009,13 +1174,27 @@ const App = {
         if (device.id === this.deviceId) return;
         // 房间成员不写入局域网列表，避免同网段房间成员双存
         if (this._roomDevices.has(device.id)) return;
+        // v2.0.6：收到 device_online 时取消 lan_only 宽容期定时器
+        if (this._lanOnlyRecoveryTimer) {
+            clearTimeout(this._lanOnlyRecoveryTimer);
+            this._lanOnlyRecoveryTimer = null;
+        }
         const isNew = !this.devices.has(device.id);
+        // 保留 device_list 已设置的 matchType（BroadcastLan 广播的 device_online 不含 matchType）
+        const existing = this.devices.get(device.id);
+        if (existing && existing.matchType && !device.matchType) {
+            device.matchType = existing.matchType;
+        }
         this.devices.set(device.id, device);
         // 若此前因 lan_only 被强制切到 room 视图但实际未入房间，现在发现同子网设备，自动切回 LAN
         if (this._deviceView === 'room' && !this._room) {
             this._deviceView = 'lan';
             this._isPublicMode = false;
             this.$('statusText').textContent = '局域网模式';
+        }
+        // 公网模式 + 未入房间时收到设备上线：主动请求设备列表，触发维度3（同公网出口）重新评估
+        if (this._isPublicMode) {
+            this.send({ type: 'request_device_list' });
         }
         this._scheduleRender();
         if (isNew) this.toast(`${device.name} 已加入`, 'info');
@@ -1076,15 +1255,11 @@ const App = {
         const scroll = this.$('deviceScroll');
         const emptyHint = this.$('emptyDevicesHint');
 
-        // 根据当前视图选择数据源：局域网设备 or 房间成员
-        // 去重：处于房间时，房间成员不应再显示在局域网列表，避免同一设备两处出现
-        let arr;
-        if (this._deviceView === 'room') {
-            arr = Array.from(this._roomDevices.values()).filter(d => d.id !== this.deviceId);
-        } else {
-            const roomIds = new Set(this._roomDevices.keys());
-            arr = Array.from(this.devices.values()).filter(d => d.id !== this.deviceId && !roomIds.has(d.id));
-        }
+        // 合并局域网设备 + 房间成员，去重（房间成员优先），排除本设备
+        const merged = new Map();
+        this.devices.forEach(d => { if (d.id && d.id !== this.deviceId) merged.set(d.id, d); });
+        this._roomDevices.forEach(d => { if (d.id && d.id !== this.deviceId) merged.set(d.id, d); });
+        const arr = Array.from(merged.values());
         count.textContent = arr.length;
 
         // 同步 tab 高亮
@@ -1098,8 +1273,8 @@ const App = {
             empty.classList.remove('hidden');
             scroll.classList.add('hidden');
             if (emptyHint) {
-                if (this._deviceView === 'room') {
-                    emptyHint.textContent = '房间内暂无其他成员，邀请对方输入相同房间号加入';
+                if (this._room) {
+                    emptyHint.textContent = '暂无设备，邀请对方输入相同房间号加入';
                 } else if (this._isPublicMode) {
                     // 公网模式：引导用户使用跨网络互传（暗号房间）
                     emptyHint.textContent = '当前公网模式，请展开「跨网络互传」创建或加入房间';
@@ -1127,7 +1302,7 @@ const App = {
             <div class="device-card ${this.selectedTarget === d.id ? 'selected' : ''}" data-id="${this.escape(d.id)}">
                 <div class="device-name">${this.escape(displayName(d))}</div>
                 <div class="device-meta">
-                    <span class="device-meta-ip">${this.formatIP(d.ip)}</span>
+                    <span class="device-meta-ip">${this.deviceDisplayIP(d)}</span>
                     <span class="device-meta-dot"></span>
                     <span class="device-meta-status">${this._deviceView === 'room' ? '房间' : '在线'}</span>
                 </div>
@@ -1161,6 +1336,7 @@ const App = {
         this.renderDevices();
         this.renderRoomState();
         this.updateSendBar();
+        this._updateNetCapPill(this.selectedTarget);
     },
 
     // 兼容局域网与房间（跨网）两种目标来源
@@ -1172,7 +1348,7 @@ const App = {
     // ===== 文件 =====
     addFiles(files) {
         if (!files?.length) return;
-        const MAX_FILE_SIZE = 50 * 1024 * 1024; // 50MB
+        const MAX_FILE_SIZE = this._maxFileSizeMB * 1024 * 1024; // 动态获取，默认50MB
         const oversized = [];
         for (const f of files) {
             if (f.size > MAX_FILE_SIZE) { oversized.push(f); }
@@ -1224,12 +1400,128 @@ const App = {
         }
     },
 
+    // 根据所选设备更新跨网络能力 pill 文本（选择前即给用户 NAT 穿透预期）
+    //
+    // v2.0.6 修正：不再简单依赖 this.devices.has(id) 判断"同局域网 P2P 直连"。
+    // 服务器通过 sameSubnetWithType 在 device_list 中为每个设备附带了 matchType，
+    // 区分真正的同局域网设备（local_lan）和仅同公网出口的设备（same_public_ip）。
+    _updateNetCapPill(id) {
+        const box = this.$('netCapPill');
+        const text = this.$('netCapPillText');
+        if (!box || !text) return;
+
+        // 未选择设备
+        if (!id) {
+            box.dataset.level = 'unknown';
+            text.textContent = '选择设备查看连接方式';
+            return;
+        }
+
+        const target = this.getTarget(id);
+        if (!target) { box.dataset.level = 'unknown'; text.textContent = '设备已离线'; return; }
+
+        // 服务器附带的匹配维度标记（v2.0.6 新增）
+        const mt = target.matchType || '';
+
+        // 维度2（local_lan）/ 维度1（server_lan）/ 维度1.5（private_prefix）：真正的同局域网，可 P2P 直连
+        if (mt === 'local_lan' || mt === 'server_lan' || mt === 'private_prefix' || mt === 'cross_lan') {
+            box.dataset.level = 'ok';
+            text.textContent = '同局域网，P2P 直连 ✓';
+            return;
+        }
+
+        // 维度3（same_public_ip）：同公网出口但可能不在同一子网，需 STUN 穿透
+        if (mt === 'same_public_ip') {
+            box.dataset.level = 'warn';
+            if (this._natHasTurn) {
+                text.textContent = '同公网出口，可通过 TURN 中继';
+            } else if (this._natHasStunPublic) {
+                text.textContent = '同公网出口，STUN 穿透可用';
+            } else {
+                text.textContent = '同公网出口，将尝试 STUN 穿透';
+            }
+            return;
+        }
+
+        // 无 matchType（旧版兼容 or 房间成员）：走原有逻辑
+        // this.devices 中无 matchType 的设备（如 device_online 广播的）回退到基于 LocalLanIP 的判断
+        if (this.devices.has(id)) {
+            if (target.localLanIp && this._localLanIp &&
+                this._samePrefix(target.localLanIp, this._localLanIp)) {
+                box.dataset.level = 'ok';
+                text.textContent = '同局域网，P2P 直连 ✓';
+            } else {
+                box.dataset.level = 'warn';
+                text.textContent = '同公网出口，将尝试 STUN 穿透';
+            }
+            return;
+        }
+
+        // 房间成员回退（_roomDevices 中无 matchType，但可能实际在同一局域网）
+        if (this._roomDevices.has(id)) {
+            // 优先级1：同局域网前缀 → 直连
+            if (target.localLanIp && this._localLanIp &&
+                this._samePrefix(target.localLanIp, this._localLanIp)) {
+                box.dataset.level = 'ok';
+                text.textContent = '同局域网，P2P 直连 ✓';
+                return;
+            }
+            // 优先级2：同公网出口 IP → NAT 可直连
+            if (target.ip && this._myIP && target.ip === this._myIP) {
+                box.dataset.level = 'warn';
+                text.textContent = this._natHasStunPublic
+                    ? '同公网出口，NAT 可直连'
+                    : '同公网出口，将尝试 STUN 穿透';
+                return;
+            }
+            // 优先级3：对方 ip 与本地 localLanIp 同前缀（热点场景反向匹配）
+            if (target.ip && this._localLanIp &&
+                this._samePrefix(target.ip, this._localLanIp)) {
+                box.dataset.level = 'ok';
+                text.textContent = '同局域网，P2P 直连 ✓';
+                return;
+            }
+        }
+
+        // 跨网络：根据本机探测能力 + 服务端 ICE 配置，给出精确的连接方式判断
+        if (this._natHasTurn) {
+            box.dataset.level = 'ok';
+            text.textContent = '跨网络，可使用 TURN 中继';
+        } else if (this._natHasV6) {
+            box.dataset.level = 'ok';
+            text.textContent = '跨网络，可通过公网 IPv6 直连';
+        } else if (this._natHasStunPublic) {
+            box.dataset.level = 'warn';
+            text.textContent = '跨网络 STUN 穿透（已获取公网地址）';
+        } else {
+            box.dataset.level = 'error';
+            text.textContent = '未配置 TURN 中继，无法传输';
+        }
+    },
+
+    // 判断两个 IP 是否在同一 /24 前缀（辅助 _updateNetCapPill 回退逻辑）
+    _samePrefix(ipA, ipB) {
+        if (!ipA || !ipB) return false;
+        const a = ipA.split('.');
+        const b = ipB.split('.');
+        if (a.length !== 4 || b.length !== 4) return false;
+        return a[0] === b[0] && a[1] === b[1] && a[2] === b[2];
+    },
+
     // ===== 发送（WebRTC P2P 直传）=====
     async startSend() {
         if (this.activeUpload) return;
         if (!this.selectedFiles.length || !this.selectedTarget) { this.toast('请选择文件和接收方', 'info'); return; }
         const target = this.getTarget(this.selectedTarget);
         if (!target) { this.toast('设备已离线', 'error'); return; }
+
+        this.centerToast(`正在发起连接到 ${target.name}…`, 'info');
+
+        // v2.0.6：跨网络传输且无 TURN 中继时，前置提醒用户（不阻止操作，STUN 穿透仍有成功可能）
+        const isCrossNet = (this._room && this._roomDevices.has(target.id)) || target.matchType === 'same_public_ip';
+        if (isCrossNet && !this._natHasTurn && !this._natHasV6) {
+            this.toast('未配置 TURN 中继，穿透若失败请在「传送设置」中配置', 'info');
+        }
 
         this.activeUpload = true;
         this.updateSendBar();
@@ -1245,8 +1537,7 @@ const App = {
                 console.warn(`[startSend] 总发送时长超过 ${timeoutSec}s，强制结束`);
                 this.toast('发送超时已强制结束', 'error');
                 try { this.showProgressDone(); } catch (e) { this.closeProgress(); }
-                this.activeUpload = false;
-                this.updateSendBar();
+                this.cleanupAllTransfers();
             }
         }, timeoutSec * 1000);
         for (let fi = 0; fi < files.length; fi++) {
@@ -1290,10 +1581,7 @@ const App = {
         } else {
             this.toast(files.length > 1 ? '全部发送完成' : '发送完成', 'success');
         }
-        this.clearFiles();
-        this.activeUpload = false;
-        this.updateSendBar();
-        this.releaseWakeLock();
+        this.cleanupAllTransfers();
     },
 
     waitForAccept(taskId, timeout) {
@@ -1451,21 +1739,9 @@ const App = {
     // 对方取消了传输：关闭连接，更新状态，避免误判为连接异常
     onTransferCancel(payload) {
         console.log('[Transfer] 对方取消了传输:', payload?.taskId);
-        // 先停心跳再关闭连接
-        if (this._recvDC) { this._stopDcHeartbeat(this._recvDC); try { this._recvDC.close(); } catch {} this._recvDC = null; }
-        if (this._recvPC) { try { this._recvPC.close(); } catch {} this._recvPC = null; }
-        if (this._sendDC) { this._stopDcHeartbeat(this._sendDC); try { this._sendDC.close(); } catch {} this._sendDC = null; }
-        if (this._sendPC) { try { this._sendPC.close(); } catch {} this._sendPC = null; }
-        // 清理 pending 状态（避免发送端 ack 等待永久挂起）
-        this._sendDoneAckResolve = null;
-        this._sendTaskId = null;
-        clearTimeout(this._reconnectWaitTimer);
-        this._reconnectWaitTimer = null;
         this.updateReceiveStatus('failed');
         this.closeProgress();
-        this.activeUpload = false;
-        this.updateSendBar();
-        this.releaseWakeLock();
+        this.cleanupAllTransfers();
         this.toast('对方已取消传输', 'info');
     },
 
@@ -1556,7 +1832,10 @@ const App = {
                 });
             } catch {}
             this._analyzeConnection(pc, isCrossNetwork, viaTurn);
-            if (isCrossNetwork) this.setNetCapResult(true, viaTurn);
+            // 暂存 TURN 状态，等 DataChannel 真正打开后再由 onopen 回写 netCapPill
+            this._lastViaTurn = viaTurn;
+            // 不在 ICE connected 阶段写 Pill —— DC 可能尚未打开，甚至信令已被 WS 断连阻断。
+            // 真正成功时由 DataChannel onopen 或传输完成回调回写 setNetCapResult。
         } else if (state === 'failed') {
             if (isCrossNetwork) {
                 // 精确诊断失败后给出可操作的提示，而非笼统的"不支持"
@@ -1648,7 +1927,7 @@ const App = {
         pc.ondatachannel = (e) => {
             const dc = e.channel;
             dc.binaryType = 'arraybuffer';
-            dc.onopen = () => this._startDcHeartbeat(dc);
+            dc.onopen = () => { this._startDcHeartbeat(dc); this.setNetCapResult(true, false); };
             dc.onmessage = (event) => this.onDataChannelMessage(event.data);
             dc.onclose = () => {
                 this._stopDcHeartbeat(dc);
@@ -1716,7 +1995,7 @@ const App = {
                 console.log('[recvPC] connectionState:', state);
                 if (state === 'connected') {
                     this._analyzeConnection(pc, inRoom);
-                    if (inRoom) this.setNetCapResult(true, false);
+                    // 不在 ICE connected 写 Pill，等 DC onopen 或传输完成再回写
                 } else if (state === 'failed') {
                     if (this._recvDone) { console.warn('[recvPC] PC failed 但传输已完成，正常'); return; }
                     if (!handled) {
@@ -1871,24 +2150,23 @@ const App = {
             // 二进制数据：文件分片
             this._recvSize += data.byteLength;
 
-            // 优先写盘（不占内存）
+            // 优先写盘（不占内存），同时缓冲到 IndexedDB 分片确保刷新后可恢复
             if (this._recvWritable) {
                 this._recvWritable.write(data);
-            } else {
-                // 移动端：缓冲到内存，每 5MB 写入 IndexedDB 清空缓冲（避免大文件内存溢出）
-                this._recvBuffer.push(data);
-                this._recvFlushSize += data.byteLength;
+            }
+            // 统一走 IndexedDB 分片缓冲路径（桌面端和移动端都保留备份，刷新后可查看/下载）
+            this._recvBuffer.push(data);
+            this._recvFlushSize += data.byteLength;
 
-                if (this._recvFlushSize >= 5 * 1024 * 1024 && !this._recvFlushing) {
-                    const bufferToFlush = this._recvBuffer;
-                    this._recvBuffer = [];
-                    this._recvFlushSize = 0;
-                    const blob = new Blob(bufferToFlush, { type: this._recvMime || 'application/octet-stream' });
-                    // 必须 await 确保 IndexedDB 落盘完成，否则 done 到达时前面的分片可能未提交
-                    this._recvFlushing = this.dbPutChunk(this._recvTaskId, this._recvChunkIndex++, blob).then(() => {
-                        this._recvFlushing = false;
-                    });
-                }
+            if (this._recvFlushSize >= 5 * 1024 * 1024 && !this._recvFlushing) {
+                const bufferToFlush = this._recvBuffer;
+                this._recvBuffer = [];
+                this._recvFlushSize = 0;
+                const blob = new Blob(bufferToFlush, { type: this._recvMime || 'application/octet-stream' });
+                // 必须 await 确保 IndexedDB 落盘完成，否则 done 到达时前面的分片可能未提交
+                this._recvFlushing = this.dbPutChunk(this._recvTaskId, this._recvChunkIndex++, blob).then(() => {
+                    this._recvFlushing = false;
+                });
             }
 
             const pct = Math.round(this._recvSize / this._recvTotal * 100);
@@ -1919,7 +2197,7 @@ const App = {
                 // 流式写盘模式（桌面端 Chrome/Edge）：等待可写流就绪并关闭，文件已保存到磁盘
                 if (this._recvWriteReady) { try { await this._recvWriteReady; } catch {} }
                 if (this._recvWritable) {
-                    // 先把缓冲在内存的数据写入（createWritable 异步期间缓存的分片）
+                    // 先把缓冲在内存的数据写入磁盘（createWritable 异步期间缓存的分片）
                     if (this._recvBuffer && this._recvBuffer.length > 0) {
                         for (const buf of this._recvBuffer) {
                             await this._recvWritable.write(buf);
@@ -1928,9 +2206,21 @@ const App = {
                     await this._recvWritable.close();
                     this._recvWritable = null;
                 }
+
+                // 同时将剩余缓冲写入 IndexedDB 分片（确保刷新后可恢复查看/下载）
+                if (this._recvFlushing) {
+                    await this._recvFlushing;
+                    this._recvFlushing = false;
+                }
+                if (this._recvBuffer.length > 0) {
+                    const blob = new Blob(this._recvBuffer, { type: this._recvMime || 'application/octet-stream' });
+                    await this.dbPutChunk(this._recvTaskId, this._recvChunkIndex++, blob);
+                    this._recvBuffer = [];
+                }
+
                 if (item) { item.status = 'saved'; item.savedToDisk = true; this.renderReceiveList(); }
 
-                // 修复：桌面端也保存元数据到 IndexedDB，刷新后已收到列表不丢失
+                // 保存元数据到 IndexedDB（chunkCount > 0 确保刷新后可从分片恢复）
                 await this.dbPut({
                     taskId: this._recvTaskId,
                     fileName: this._recvName,
@@ -1938,7 +2228,7 @@ const App = {
                     fromName: item?.fromName || '未知设备',
                     time: item?.time || new Date(),
                     mime: this._recvMime || 'application/octet-stream',
-                    chunkCount: 0,
+                    chunkCount: this._recvChunkIndex,
                     savedToDisk: true
                 });
 
@@ -2036,12 +2326,6 @@ const App = {
 
     // ===== 接收请求 =====
     onTransferRequest(payload) {
-        // 微信浏览器不支持接收，自动拒绝
-        if (this.isWechat) {
-            this.send({ type: 'transfer_reject', payload: { fromId: payload.fromId, taskId: payload.taskId } });
-            this.toast('微信浏览器不支持接收文件，已自动拒绝', 'info');
-            return;
-        }
         // 正在等待接收或正在接收中，自动拒绝新请求（避免 P2P 连接覆盖导致传输中断）
         if (this.pendingReceive || this._recvPC) {
             this.send({ type: 'transfer_reject', payload: { fromId: payload.fromId, taskId: payload.taskId } });
@@ -2158,8 +2442,8 @@ const App = {
         const item = this.receiveHistory.find(i => i.taskId === taskId);
         if (!item) return;
 
-        if (item.savedToDisk) {
-            // 文件已通过 File System Access API 保存到磁盘
+        if (item.savedToDisk && !item.chunkCount) {
+            // 文件已通过 File System Access API 保存到磁盘，且无 IndexedDB 备份
             this.toast('文件已保存到磁盘', 'info');
             return;
         }
@@ -2174,7 +2458,7 @@ const App = {
             return;
         }
 
-        // 刷新后从 IndexedDB 分片恢复
+        // 刷新后从 IndexedDB 分片恢复（含桌面端流式写盘的 IndexedDB 备份）
         await this.openPreviewFromDB(taskId, fileName, true);
     },
 
@@ -2343,8 +2627,8 @@ const App = {
             if (item.status === 'downloading') { st = '接收中'; cls = 'downloading'; }
             else if (item.status === 'saved') {
                 st = '已保存'; cls = 'saved';
-                // 磁盘已保存的文件不显示查看/下载按钮（文件已在磁盘上）
-                if (!item.savedToDisk) {
+                // 磁盘已保存的文件：若有 IndexedDB 分片备份（chunkCount > 0），仍可刷新后查看/下载
+                if (!item.savedToDisk || item.chunkCount > 0) {
                     action = this.isImage(item.fileName) || this.isVideo(item.fileName) ? '查看' : '下载';
                 }
             }
@@ -2453,11 +2737,6 @@ const App = {
 
     // 取消当前传输：关闭 WebRTC 连接，通知对端，清理状态
     cancelTransfer() {
-        // 清理重连等待定时器（避免用户取消后延迟弹出错误 toast）
-        if (this._reconnectWaitTimer) {
-            clearTimeout(this._reconnectWaitTimer);
-            this._reconnectWaitTimer = null;
-        }
         const taskId = this._sendTaskId || this._recvTaskId;
         // 通知对端取消传输（需在关闭连接前发送）
         if (taskId) {
@@ -2466,24 +2745,57 @@ const App = {
                 this.send({ type: 'transfer_cancel', payload: { taskId, toId } });
             }
         }
-        // 关闭发送端 WebRTC（先停心跳再关连接）
+        // 更新接收状态为失败
+        this.updateReceiveStatus('failed');
+        // 关闭进度弹窗
+        this.closeProgress();
+        // 统一清理所有传输资源
+        this.cleanupAllTransfers();
+        this.toast('已取消传输', 'info');
+    },
+
+    // 传输完成后统一清理：释放所有 P2P 资源，重置状态，确保下次传输从干净状态开始
+    cleanupAllTransfers() {
+        // 清理重连等待定时器
+        if (this._reconnectWaitTimer) {
+            clearTimeout(this._reconnectWaitTimer);
+            this._reconnectWaitTimer = null;
+        }
+        // 清理进度弹窗自动关闭定时器
+        if (this._doneAutoCloseTimer) {
+            clearTimeout(this._doneAutoCloseTimer);
+            this._doneAutoCloseTimer = null;
+        }
+        // 关闭发送端（先停心跳再关连接）
         if (this._sendDC) { this._stopDcHeartbeat(this._sendDC); try { this._sendDC.close(); } catch {} this._sendDC = null; }
         if (this._sendPC) { try { this._sendPC.close(); } catch {} this._sendPC = null; }
         this._sendTaskId = null;
         this._sendDoneAckResolve = null;
-        // 关闭接收端 WebRTC（先停心跳再关连接）
+        // 关闭接收端（先停心跳再关连接）
         if (this._recvDC) { this._stopDcHeartbeat(this._recvDC); try { this._recvDC.close(); } catch {} this._recvDC = null; }
         if (this._recvPC) { try { this._recvPC.close(); } catch {} this._recvPC = null; }
         this._recvTaskId = null;
-        // 更新接收状态
-        this.updateReceiveStatus('failed');
-        // 关闭进度弹窗
-        this.closeProgress();
+        // 清理接收缓冲和文件句柄
+        this._recvBuffer = [];
+        this._recvFlushing = false;
+        if (this._recvWritable) { try { this._recvWritable.close(); } catch {} this._recvWritable = null; }
+        this._recvWriteReady = null;
+        this._recvFileHandle = null;
+        // 重置网络能力探测结果
+        this._lastViaTurn = undefined;
+        this._lastNetCapResult = undefined;
+        // 重置接收完成标记
+        this._recvDone = false;
+        this._recvPendingFinish = false;
+        clearTimeout(this._recvFinishTimer);
+        this._recvFinishTimer = null;
         // 重置发送状态
         this.activeUpload = false;
-        this.updateSendBar();
+        this.clearFiles();
+        this.selectedTarget = null;
+        this.updateNetCapPill('unknown');
+        // 释放屏幕常亮
         this.releaseWakeLock();
-        this.toast('已取消传输', 'info');
     },
 
     // ===== 状态 =====
@@ -2562,7 +2874,7 @@ const App = {
     },
     // ===== 文件大小超限浮窗 =====
     showSizeLimitAlert(files) {
-        const maxSize = 50 * 1024 * 1024;
+        const maxSize = this._maxFileSizeMB * 1024 * 1024;
         const names = files.map(f => `${this.escape(f.name)} <span style="color:var(--text-3)">${this.formatSize(f.size)}</span>`).join(', ');
         this.$('sizeLimitFiles').innerHTML = names;
         this.$('sizeLimitMax').textContent = this.formatSize(maxSize);
@@ -2576,6 +2888,22 @@ const App = {
         t.innerHTML = `<span class="toast-dot"></span><span>${this.escape(msg)}</span>`;
         c.appendChild(t);
         setTimeout(() => { t.classList.add('out'); setTimeout(() => t.remove(), 150); }, 2800);
+    },
+
+    // 居中浮窗提醒（z-index 高于 overlay，发送/接收关键节点给用户明确反馈）
+    centerToast(msg, type = 'info') {
+        let ct = document.getElementById('centerToast');
+        if (!ct) {
+            ct = document.createElement('div');
+            ct.id = 'centerToast';
+            document.body.appendChild(ct);
+        }
+        ct.textContent = msg;
+        ct.className = 'center-toast center-toast-' + type + ' center-toast-show';
+        clearTimeout(this._centerToastTimer);
+        this._centerToastTimer = setTimeout(() => {
+            ct.classList.remove('center-toast-show');
+        }, 2500);
     }
 };
 

@@ -122,6 +122,16 @@ func (h *WSHandler) HandleWebSocket(w http.ResponseWriter, r *http.Request) {
 				"reused":   true,
 			},
 		})
+
+		// 重新注册到活跃设备列表（确保不被旧 readLoop 的 MarkOffline 竞争覆盖）
+		dm.Register(deviceID, deviceName, ip)
+
+		// 复用场景也需广播上线 + 重新评估可见性（修复刷新后同IP误判公网）
+		go h.BroadcastLan(&Message{
+			Type:    "device_online",
+			Payload: device,
+		})
+		go h.reEvaluateForNewDevice(deviceID)
 	} else {
 		deviceID := generateID()
 
@@ -150,20 +160,30 @@ func (h *WSHandler) HandleWebSocket(w http.ResponseWriter, r *http.Request) {
 			Type:    "device_online",
 			Payload: device,
 		})
+		// 新设备注册后，重新评估已连接的受限设备是否可通过维度3（同公网出口）发现此新设备
+		go h.reEvaluateForNewDevice(deviceID)
 	}
 
-	// 发送当前设备列表（排除自己）；公网受限模式不暴露局域网设备
-	if restricted {
+	// SnapDrop 架构：同公网出口 IP 即同房间。新设备由 reEvaluateForNewDevice 推送给已有设备。
+	devices := h.getVisibleDevices(device.ID)
+	if len(devices) == 0 {
 		h.sendToConn(conn, &Message{
 			Type:    "lan_only",
 			Payload: map[string]string{"message": "当前为公网模式，仅支持暗号房间互传"},
 		})
+		log.Printf("[NET-VISIBLE] 设备 %s(IP=%s) → lan_only: 0 台可见",
+			device.ID, ip)
 	} else {
-		devices := h.getVisibleDevices(device.ID)
 		h.sendToConn(conn, &Message{
 			Type:    "device_list",
 			Payload: devices,
 		})
+		dips := make([]string, len(devices))
+		for i, d := range devices {
+			dips[i] = d.ID + "(" + d.IP + ")"
+		}
+		log.Printf("[NET-VISIBLE] 设备 %s(IP=%s) → device_list: 可见 %d 台 %v",
+			device.ID, ip, len(devices), dips)
 	}
 
 	// 读取消息
@@ -174,6 +194,12 @@ func (h *WSHandler) HandleWebSocket(w http.ResponseWriter, r *http.Request) {
 func (h *WSHandler) readLoop(conn *websocket.Conn, deviceID string) {
 	defer func() {
 		h.mu.Lock()
+		// 连接身份校验：如果当前存储的连接已被新连接替换（刷新复用场景），
+		// 旧 readLoop 不应清理新连接的资源和设备状态，直接返回。
+		if h.connections[deviceID] != conn {
+			h.mu.Unlock()
+			return
+		}
 		delete(h.connections, deviceID)
 		delete(h.writeMu, deviceID)
 		delete(h.connRestricted, deviceID)
@@ -228,6 +254,8 @@ func (h *WSHandler) readLoop(conn *websocket.Conn, deviceID string) {
 			break
 		}
 
+		// 任何客户端消息都刷新心跳，避免仅依赖前端主动 heartbeat 的脆弱性
+		service.GetDeviceManager().Heartbeat(deviceID)
 		h.handleMessage(deviceID, message)
 	}
 }
@@ -288,6 +316,11 @@ func (h *WSHandler) handleMessage(deviceID string, data []byte) {
 						Payload: dev,
 					})
 				}
+
+				// 补充修复：当新设备上报 localLanIp 后，遍历所有已连接的受限设备，
+				// 检查它们现在是否与当前设备处于同用户子网（维度2），
+				// 避免因两设备上报时间差导致互相发现遗漏。
+				go h.reEvaluateRestrictedDevices(deviceID)
 			}
 		}
 
@@ -447,7 +480,7 @@ func (h *WSHandler) isRestricted(deviceID string) bool {
 
 // getVisibleDevices 返回对某设备可见的设备列表（排除自己）。
 //
-// 网络模式（v2.0.1 重构 + 修正）：
+// 网络模式（v2.0.1 重构 + v2.0.6 修正）：
 //   - 与服务器同子网（服务器 LAN 内） -> 互见
 //   - 与另一客户端同用户子网（连同一热点/WiFi，前端探测局域网 IP 同 /24 前缀） -> 互见、直连
 //   - 其余（移动、异网、跨子网且无同子网同伴） -> 不互见，仅可房间互传
@@ -455,6 +488,8 @@ func (h *WSHandler) isRestricted(deviceID string) bool {
 // 关键修正：可见性不再依赖"自身是否公网受限"，而是"与候选设备是否同子网"。
 // 连同一热点/WiFi 的公网用户（客户端 IP 为公网出口，但 LocalLanIP 同前缀）
 // 也应互相发现并直连，之前被 isRestricted 误杀，现已解开。
+//
+// v2.0.6 增加 MatchType：返回副本设备并标记匹配维度，前端据此给出准确连接能力提示。
 func (h *WSHandler) getVisibleDevices(selfID string) []*service.Device {
 	self, ok := service.GetDeviceManager().GetDevice(selfID)
 	if !ok {
@@ -467,11 +502,14 @@ func (h *WSHandler) getVisibleDevices(selfID string) []*service.Device {
 		if d == nil {
 			continue
 		}
-		// 与自己在同一个子网（服务器子网或同用户子网）才可见
-		if !sameSubnet(self, d) {
+		matched, matchType := sameSubnetWithType(self, d)
+		if !matched {
 			continue
 		}
-		visible = append(visible, d)
+		// 创建副本，设置匹配维度标记（避免修改全局状态的设备对象）
+		devCopy := *d
+		devCopy.MatchType = matchType
+		visible = append(visible, &devCopy)
 	}
 	return visible
 }
@@ -479,42 +517,83 @@ func (h *WSHandler) getVisibleDevices(selfID string) []*service.Device {
 // sameSubnet 判断两个设备是否处于同一局域网（任一维度）：
 //  1. 二者客户端 IP 都与服务器同子网（服务器 LAN 内）
 //  2. 二者前端探测到的局域网 IP 落在同一私网前缀（连同一热点/WiFi）
+//  3. 二者客户端 IP 相同（同一公网出口，如同一公司/组织网络）
 func sameSubnet(a, b *service.Device) bool {
-	if a == nil || b == nil {
-		return false
-	}
-	// 维度 1：都与服务器同子网
-	if isSameSubnetAsServer(a.IP) && isSameSubnetAsServer(b.IP) {
-		return true
-	}
-	// 维度 2：同用户子网（前端探测的局域网 IP 私网前缀相同，且非服务器子网）
-	if a.LocalLanIP != "" && b.LocalLanIP != "" {
-		if lanPrefixEqual(a.LocalLanIP, b.LocalLanIP) {
-			return true
-		}
-	}
-	return false
+	ok, _ := sameSubnetWithType(a, b)
+	return ok
 }
 
-// lanPrefixEqual 判断两个局域网 IP 是否在同一 /24 私网前缀。
-// 仅对私有地址生效，避免把公网 IP 当子网判定。
+// sameSubnetWithType 参考 SnapDrop 架构，以"同公网出口IP"为主分组依据：
+//
+//	"same_public_ip" — 同公网出口 IP（IPv4 完全相同 / IPv6 同 /64 前缀），即 SnapDrop 的房间概念
+//	"local_lan"      — 维度2：前端探测的同用户子网（热点/WiFi 直连场景，不同出口 IP 但同局域网）
+//	"cross_lan"      — 跨匹配（IP ↔ LocalLanIP）
+func sameSubnetWithType(a, b *service.Device) (bool, string) {
+	if a == nil || b == nil {
+		return false, ""
+	}
+	// SnapDrop 核心：同公网出口 IP 即同房间（IPv4 完全相同）
+	if a.IP != "" && a.IP == b.IP {
+		return true, "same_public_ip"
+	}
+	// IPv6：同 /64 前缀即同房间（每设备独立地址，但同子网共享前缀）
+	if a.IP != "" && b.IP != "" {
+		pa := net.ParseIP(a.IP)
+		pb := net.ParseIP(b.IP)
+		if pa != nil && pb != nil && pa.To4() == nil && pb.To4() == nil {
+			if lanPrefixEqual(a.IP, b.IP) {
+				return true, "same_public_ip"
+			}
+		}
+	}
+	// 维度2：LocalLanIP 补充 — 热点/WiFi 场景（不同出口 IP 但同局域网）
+	if a.LocalLanIP != "" && b.LocalLanIP != "" {
+		if lanPrefixEqual(a.LocalLanIP, b.LocalLanIP) || a.LocalLanIP == b.LocalLanIP {
+			return true, "local_lan"
+		}
+	}
+	// 跨匹配：一方 IP 等于另一方 LocalLanIP
+	if a.IP != "" && b.LocalLanIP != "" && a.IP == b.LocalLanIP && !isSameSubnetAsServer(a.IP) {
+		return true, "cross_lan"
+	}
+	if b.IP != "" && a.LocalLanIP != "" && b.IP == a.LocalLanIP && !isSameSubnetAsServer(b.IP) {
+		return true, "cross_lan"
+	}
+	return false, ""
+}
+
+// lanPrefixEqual 判断两个 IP 是否在同一子网前缀。
+// IPv4：比较 /24（前三段相同），IPv6：比较 /64（前 8 字节相同）。
+// 不限公私网，涵盖公网反代、IPv6 双栈等部署场景。
 func lanPrefixEqual(ipA, ipB string) bool {
 	pa := net.ParseIP(strings.TrimSpace(ipA))
 	pb := net.ParseIP(strings.TrimSpace(ipB))
 	if pa == nil || pb == nil {
 		return false
 	}
-	// 仅私网地址参与"同用户子网"判定
-	if !isPrivateIP(ipA) || !isPrivateIP(ipB) {
-		return false
-	}
 	va := pa.To4()
 	vb := pb.To4()
-	if va == nil || vb == nil {
-		return false
+	if va != nil && vb != nil {
+		// IPv4：比较 /24
+		return va[0] == vb[0] && va[1] == vb[1] && va[2] == vb[2]
 	}
-	// 比较前三段（/24）
-	return va[0] == vb[0] && va[1] == vb[1] && va[2] == vb[2]
+	// IPv6：比较 /64（前 8 字节），排除回环地址
+	if va == nil && vb == nil {
+		if pa.IsLoopback() || pb.IsLoopback() {
+			return false
+		}
+		v6a := pa.To16()
+		v6b := pb.To16()
+		if v6a != nil && v6b != nil {
+			for i := 0; i < 8; i++ {
+				if v6a[i] != v6b[i] {
+					return false
+				}
+			}
+			return true
+		}
+	}
+	return false
 }
 
 // isSameSubnetAsServer 判断客户端 IP 是否落在服务器自身任一网卡网段内。
@@ -575,6 +654,99 @@ func (h *WSHandler) BroadcastLan(msg *Message) {
 	}
 }
 
+// reEvaluateRestrictedDevices 遍历所有已连接的受限设备，检查它们是否与新上报 localLanIp 的设备
+// 处于同用户子网（维度2）。如果发现匹配，则向受限设备发送 device_list 刷新其设备列表，
+// 使其从"公网受限"模式切换到"局域网"模式。
+func (h *WSHandler) reEvaluateRestrictedDevices(newDeviceID string) {
+	newDev, ok := service.GetDeviceManager().GetDevice(newDeviceID)
+	if !ok || newDev.LocalLanIP == "" {
+		return
+	}
+
+	h.mu.RLock()
+	ids := make([]string, 0, len(h.connections))
+	for id := range h.connections {
+		if id != newDeviceID {
+			ids = append(ids, id)
+		}
+	}
+	h.mu.RUnlock()
+
+	for _, id := range ids {
+		target, ok := service.GetDeviceManager().GetDevice(id)
+		if !ok {
+			continue
+		}
+		// 检查是否同子网（任一维度：服务器LAN / 同LocalLanIP前缀 / 同公网出口）
+		if !sameSubnet(newDev, target) {
+			continue
+		}
+		// 检查目标是否已受限（只有受限设备才需要重新评估）
+		// 如果已经可见同子网设备，则无需重复通知
+		visible := h.getVisibleDevices(id)
+		if len(visible) > 0 {
+			h.SendToDevice(id, &Message{
+				Type:    "device_list",
+				Payload: visible,
+			})
+			log.Printf("reEvaluateRestrictedDevices: 设备 %s(%s) 已与 %s(%s) 同子网，刷新设备列表",
+				id, target.LocalLanIP, newDeviceID, newDev.LocalLanIP)
+		}
+	}
+	// 最后，向上报设备自己回推一次 device_list，确保它能获得其他已上报 localLanIp
+	// 的设备的最新数据。此前 reEvaluate 只推给其他设备，导致上报设备看到的同伴
+	// 可能仍为公网 IP（对方的探测尚未完成），产生"有的显示内网、有的显示公网"的偏差。
+	visibleSelf := h.getVisibleDevices(newDeviceID)
+	if len(visibleSelf) > 0 {
+		h.SendToDevice(newDeviceID, &Message{
+			Type:    "device_list",
+			Payload: visibleSelf,
+		})
+		log.Printf("reEvaluateRestrictedDevices: 回推 device_list 给 %s(%s)，共 %d 台可见设备",
+			newDeviceID, newDev.LocalLanIP, len(visibleSelf))
+	}
+}
+
+// reEvaluateForNewDevice 新设备注册后立即调用（无需等待 LocalLanIP），
+// 遍历所有已连接设备，检查是否可经由维度1（服务器子网）或维度3（同公网出口）
+// 与新设备建立互见。若匹配则向其发送 device_list，使其发现新设备。
+func (h *WSHandler) reEvaluateForNewDevice(newDeviceID string) {
+	newDev, ok := service.GetDeviceManager().GetDevice(newDeviceID)
+	if !ok {
+		return
+	}
+
+	h.mu.RLock()
+	ids := make([]string, 0, len(h.connections))
+	for id := range h.connections {
+		if id != newDeviceID {
+			ids = append(ids, id)
+		}
+	}
+	h.mu.RUnlock()
+
+	for _, id := range ids {
+		target, ok := service.GetDeviceManager().GetDevice(id)
+		if !ok {
+			continue
+		}
+		// 仅检查同子网（维度1服务器LAN / 维度3同公网出口，二者均不依赖 LocalLanIP）
+		if !sameSubnet(newDev, target) {
+			continue
+		}
+		// 为该已连接设备重新计算可见设备列表，若新设备可见则推送 device_list
+		visible := h.getVisibleDevices(id)
+		if len(visible) > 0 {
+			h.SendToDevice(id, &Message{
+				Type:    "device_list",
+				Payload: visible,
+			})
+			log.Printf("reEvaluateForNewDevice: 设备 %s(%s) 现可发现新设备 %s(%s)，刷新设备列表（可见 %d 台）",
+				id, target.IP, newDeviceID, newDev.IP, len(visible))
+		}
+	}
+}
+
 // SendToDevice 发送消息给指定设备
 func (h *WSHandler) SendToDevice(deviceID string, msg *Message) {
 	h.mu.RLock()
@@ -612,7 +784,8 @@ func (h *WSHandler) sendToConn(conn *websocket.Conn, msg *Message) {
 
 	log.Printf(">>> 发送消息 [%s]: %s", msg.Type, string(data))
 	if err := conn.WriteMessage(websocket.TextMessage, data); err != nil {
-		log.Printf("Send error: %v", err)
+		log.Printf("Send error (关闭连接): %v", err)
+		conn.Close() // 触发 readLoop 退出 → defer 清理设备状态
 	}
 }
 
@@ -766,19 +939,36 @@ var serverSubnets []*net.IPNet
 
 func init() {
 	for _, cidr := range []string{
-		// IPv4 私有地址
-		"10.0.0.0/8",
-		"172.16.0.0/12",
-		"192.168.0.0/16",
-		"127.0.0.0/8",
-		// IPv4 链路本地
-		"169.254.0.0/16",
-		// IPv4 CGNAT (运营商级NAT) 不视为私网：
-		// 移动流量等出口多为 100.64/10，应判定为公网受限，避免误发现异网设备
-		// IPv6 私有地址
-		"fc00::/7",
-		"fe80::/10",
-		"::1/128",
+		// ========== IPv4 私有地址 ==========
+		"10.0.0.0/8",     // 经典 A 类私有
+		"172.16.0.0/12",  // 经典 B 类私有
+		"192.168.0.0/16", // 经典 C 类私有
+		"127.0.0.0/8",    // 本机回环
+
+		// ========== IPv4 链路本地 ==========
+		"169.254.0.0/16", // 链路本地（DHCP 失败自动分配）
+
+		// ========== IPv4 CGNAT (运营商级NAT) ==========
+		// 移动/4G/5G 流量出口多为 100.64/10，应判定为公网受限，避免误发现异网设备
+		// 注释掉以保持保守策略：
+		// "100.64.0.0/10",
+
+		// ========== IPv4 其他特殊用途段 ==========
+		"198.18.0.0/15", // 网络基准测试 (RFC 2544)
+		"240.0.0.0/4",   // 保留地址（部分企业/学校内部使用）
+
+		// ========== IPv6 私有/唯一本地地址 ==========
+		"fc00::/7", // 唯一本地地址 ULA (类似 IPv4 私有)
+		"fd00::/8", // 唯一本地地址 ULA（fc00::/7 的子集，更常用）
+
+		// ========== IPv6 链路本地 ==========
+		"fe80::/10", // 链路本地地址
+
+		// ========== IPv6 回环 ==========
+		"::1/128", // 本机回环
+
+		// ========== IPv6 唯一本地地址补充 ==========
+		"fec0::/10", // 站点本地地址（已弃用，但部分旧网络仍在使用）
 	} {
 		_, network, err := net.ParseCIDR(cidr)
 		if err == nil {
@@ -867,10 +1057,14 @@ func (h *WSHandler) handleRoomCreate(deviceID string, _ interface{}) {
 	dm := service.GetDeviceManager()
 	dev, _ := dm.GetDevice(deviceID)
 	name := ""
+	ip := ""
+	localLanIP := ""
 	if dev != nil {
 		name = dev.Name
+		ip = dev.IP
+		localLanIP = dev.LocalLanIP
 	}
-	room := service.GetRoomManager().CreateRoom(deviceID, name)
+	room := service.GetRoomManager().CreateRoom(deviceID, name, ip, localLanIP)
 	h.SendToDevice(deviceID, &Message{
 		Type: "room_created",
 		Payload: map[string]interface{}{
@@ -904,15 +1098,19 @@ func (h *WSHandler) handleRoomJoin(deviceID string, payload interface{}) {
 	dm := service.GetDeviceManager()
 	dev, _ := dm.GetDevice(deviceID)
 	name := ""
+	ip := ""
+	localLanIP := ""
 	if dev != nil {
 		name = dev.Name
+		ip = dev.IP
+		localLanIP = dev.LocalLanIP
 	}
 
-	room, joined := service.GetRoomManager().JoinRoom(code, deviceID, name)
-	if !joined {
+	room, err := service.GetRoomManager().JoinRoom(code, deviceID, name, ip, localLanIP)
+	if err != nil {
 		h.SendToDevice(deviceID, &Message{
 			Type:    "room_error",
-			Payload: map[string]interface{}{"code": "room_not_found", "message": "房间不存在或已解散"},
+			Payload: map[string]interface{}{"code": "room_join_failed", "message": err.Error()},
 		})
 		return
 	}
@@ -928,12 +1126,14 @@ func (h *WSHandler) handleRoomJoin(deviceID string, payload interface{}) {
 		},
 	})
 
-	// 广播其他成员有新设备加入
+	// 广播其他成员有新设备加入（含网络信息，便于前端判断连接方式）
 	go h.BroadcastRoom(room, deviceID, &Message{
 		Type: "room_device_joined",
 		Payload: map[string]interface{}{
-			"id":   deviceID,
-			"name": name,
+			"id":         deviceID,
+			"name":       name,
+			"ip":         ip,
+			"localLanIp": localLanIP,
 		},
 	})
 }

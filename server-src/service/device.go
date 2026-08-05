@@ -8,8 +8,8 @@ import (
 const (
 	// 心跳间隔
 	HeartbeatInterval = 30 * time.Second
-	// 超时时间
-	TimeoutDuration = 90 * time.Second
+	// 超时时间（缩短到 45s 加速死连接清理）
+	TimeoutDuration = 45 * time.Second
 	// 离线缓冲时间（断开后保留设备记录的时长，用于刷新页面时复用）
 	OfflineKeepDuration = 60 * time.Second
 	// 离线设备清理检查间隔
@@ -20,17 +20,18 @@ const (
 type Device struct {
 	ID         string    `json:"id"`
 	Name       string    `json:"name"`
-	IP         string    `json:"ip"`         // 连接服务器的真实客户端 IP
-	LocalLanIP string    `json:"localLanIp"` // 前端 WebRTC 探测到的本机局域网 IP（用于"同用户子网"判定）
+	IP         string    `json:"ip"`                  // 连接服务器的真实客户端 IP
+	LocalLanIP string    `json:"localLanIp"`          // 前端 WebRTC 探测到的本机局域网 IP（用于"同用户子网"判定）
+	MatchType  string    `json:"matchType,omitempty"` // 设备可见性判定维度：server_lan / private_prefix / local_lan / cross_lan / same_public_ip
 	OnlineAt   time.Time `json:"onlineAt"`
 	LastBeat   time.Time `json:"lastBeat"`
 }
 
 // DeviceManager 设备管理器
 type DeviceManager struct {
-	mu              sync.RWMutex
-	devices         map[string]*Device
-	offlineDevices  map[string]*Device // 离线缓存（保留 OfflineKeepDuration）
+	mu               sync.RWMutex
+	devices          map[string]*Device
+	offlineDevices   map[string]*Device // 离线缓存（保留 OfflineKeepDuration）
 	startCleanerOnce sync.Once
 }
 
@@ -55,6 +56,7 @@ func GetDeviceManager() *DeviceManager {
 func (dm *DeviceManager) Register(id, name, ip string) *Device {
 	return dm.RegisterWithLan(id, name, ip, "")
 }
+
 // RegisterWithLan 注册设备并写入前端探测到的局域网 IP
 func (dm *DeviceManager) RegisterWithLan(id, name, ip, lanIP string) *Device {
 	dm.mu.Lock()
