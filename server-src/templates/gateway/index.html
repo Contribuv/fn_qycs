@@ -284,7 +284,11 @@
                 </div>
                 <div class="form-group">
                     <label class="form-label">TURN 地址</label>
-                    <input type="text" class="form-input monospace" id="turnServer" placeholder="turn:your-turn-server.com:3478">
+                    <div class="form-input-row">
+                        <input type="text" class="form-input monospace" id="turnServer" placeholder="turn:your-turn-server.com:3478">
+                        <button class="mac-btn-sm" id="turnTestBtn" onclick="testTurnServer('turn')">测试</button>
+                    </div>
+                    <div class="test-result" id="turnTestResult"></div>
                     <div class="form-help">格式：<code style="background:var(--gw-card-bg);padding:1px 5px;border-radius:3px">turn:host:port</code>，多个地址逗号分隔。支持 UDP/TCP。</div>
                 </div>
                 <div class="form-row-2">
@@ -297,13 +301,21 @@
                         <input type="password" class="form-input" id="turnPassword" placeholder="密码（选填）">
                     </div>
                 </div>
+                <div class="settings-info-tip">
+                    <strong>没有 TURN 服务器？</strong> 在 <a href="https://www.metered.ca/tools/openrelay/" target="_blank" rel="noopener">www.metered.ca</a> 免费注册，登录后点击面板的 <code style="background:var(--gw-card-bg);padding:1px 5px;border-radius:3px">Credentials</code> 按钮获取地址、用户名、密钥填入上方。<br>
+                    也可用此工具在线验证：<a href="https://openreplay.com/zh/tools/webrtc-ice-test/" target="_blank" rel="noopener">WebRTC ICE 在线测试</a>
+                </div>
                 <div class="settings-separator">
                     <span style="font-weight:600;color:var(--gw-text-primary)">TURNS (TLS) 中继服务器（可选）</span>
                     <div class="settings-separator-hint">TURN over TLS，提供加密传输，安全性更高。</div>
                 </div>
                 <div class="form-group">
                     <label class="form-label">TURNS 地址</label>
-                    <input type="text" class="form-input monospace" id="turnsServer" placeholder="turns:your-turn-server.com:5349">
+                    <div class="form-input-row">
+                        <input type="text" class="form-input monospace" id="turnsServer" placeholder="turns:your-turn-server.com:5349">
+                        <button class="mac-btn-sm" id="turnsTestBtn" onclick="testTurnServer('turns')">测试</button>
+                    </div>
+                    <div class="test-result" id="turnsTestResult"></div>
                     <div class="form-help">格式：<code style="background:var(--gw-card-bg);padding:1px 5px;border-radius:3px">turns:host:port</code>，多个地址逗号分隔。仅 TLS 连接。</div>
                 </div>
                 <div class="form-row-2">
@@ -400,8 +412,14 @@ let portCheckTimer = null;
 let uiLocked = false;
 let uiLockTimer = null;
 
+// 自动适配 API 路径前缀：
+//   - 通过飞牛统一网关访问（路径以 /app/fn_qycs/ 开头）→ 带前缀
+//   - 直接 TCP 访问（调试）→ 不带前缀
 function apiPath(suffix) {
-    return '/app/fn_qycs/gateway' + suffix;
+    if (window.location.pathname.startsWith('/app/fn_qycs/')) {
+        return '/app/fn_qycs/gateway' + suffix;
+    }
+    return '/gateway' + suffix;
 }
 
 document.addEventListener('DOMContentLoaded', () => {
@@ -793,6 +811,114 @@ async function saveSettings() {
     } catch (e) {
         msg.className = 'status-error';
         msg.textContent = '✗ 保存失败: ' + e.message;
+    }
+}
+
+// ===== TURN / TURNS 连通性测试 =====
+// 原理：创建临时 RTCPeerConnection 仅包含目标中继服务器，等待 ICE gathering 完成，
+//       观察是否有 relay（typ relay）候选出现。若出现 relay 候选，说明服务器连通且鉴权正确。
+async function testTurnServer(type) {
+    const idMap = {
+        turn:  { addr: 'turnServer',  user: 'turnUsername',  pass: 'turnPassword',  result: 'turnTestResult',  btn: 'turnTestBtn'  },
+        turns: { addr: 'turnsServer', user: 'turnsUsername', pass: 'turnsPassword', result: 'turnsTestResult', btn: 'turnsTestBtn' }
+    };
+    const ids = idMap[type];
+    if (!ids) return;
+
+    const addrEl   = document.getElementById(ids.addr);
+    const userEl   = document.getElementById(ids.user);
+    const passEl   = document.getElementById(ids.pass);
+    const resultEl = document.getElementById(ids.result);
+    const btn      = document.getElementById(ids.btn) || addrEl?.closest('.form-input-row')?.querySelector('.mac-btn-sm');
+    if (!addrEl || !resultEl) return;
+
+    const addr = (addrEl.value || '').trim();
+    if (!addr) {
+        resultEl.textContent = '请先填写地址';
+        resultEl.className = 'test-result fail';
+        setTimeout(function() { resultEl.textContent = ''; resultEl.className = 'test-result'; }, 3000);
+        return;
+    }
+
+    // 显示测试中状态
+    if (btn) { btn.disabled = true; btn.textContent = '测试中…'; }
+    resultEl.textContent = '测试中…';
+    resultEl.className = 'test-result loading';
+
+    // 构建 ICE 服务器列表：目标 TURN + 一个公共 STUN 辅助（加速 ICE gathering）。
+    // 仅配 TURN 不加 STUN 时，ICE agent 缺少网络探针，某些浏览器下 gathering 启动极慢。
+    var scheme = type === 'turns' ? 'turns' : 'turn';
+    var urls = addr.split(',').map(function(s) {
+        s = s.trim();
+        if (!s) return null;
+        if (/^(stun|turn|turns):/i.test(s)) return s;
+        return scheme + ':' + s;
+    }).filter(Boolean);
+    var servers = [{ urls: urls }];
+    var username = (userEl && userEl.value || '').trim();
+    var credential = passEl && passEl.value || '';
+    if (username) { servers[0].username = username; servers[0].credentialType = 'password'; }
+    if (credential) servers[0].credential = credential;
+    // 加一个公共 STUN 辅助 ICE agent（不干扰 relay 判断——只查 typ relay）
+    servers.push({ urls: 'stun:stun.l.google.com:19302' });
+
+    var pc = null;
+    var dummyPc = null;
+    var relayFound = false;
+    var settled = false;
+    var timer = null;
+
+    var finish = function(success, text) {
+        if (settled) return;
+        settled = true;
+        if (timer) { clearTimeout(timer); timer = null; }
+        if (pc) { try { pc.close(); } catch(e) {} pc = null; }
+        if (dummyPc) { try { dummyPc.close(); } catch(e) {} dummyPc = null; }
+        if (btn) { btn.disabled = false; btn.textContent = '测试'; }
+        resultEl.innerHTML = '<span class="test-icon">' + (success ? '&#10003;' : '&#10007;') + '</span>' + text;
+        resultEl.className = 'test-result ' + (success ? 'success' : 'fail');
+    };
+
+    try {
+        pc = new RTCPeerConnection({ iceServers: servers });
+
+        timer = setTimeout(function() { finish(false, '超时（服务器无响应，15 秒）'); }, 15000);
+
+        pc.onicecandidate = function(e) {
+            if (!e.candidate) {
+                clearTimeout(timer);
+                timer = null;
+                if (!relayFound) {
+                    var hint = type === 'turns' ? '（可能原因：TLS 证书不受信任、服务器不可达或鉴权失败）' : '（服务器不可达或鉴权失败）';
+                    finish(false, '未获取到中继候选 ' + hint);
+                }
+                return;
+            }
+            var c = e.candidate.candidate || '';
+            if (c.indexOf('typ relay') !== -1) {
+                relayFound = true;
+                clearTimeout(timer);
+                timer = null;
+                finish(true, '服务器正常（已获取中继候选）');
+            }
+        };
+
+        // 创建 DataChannel 以触发 ICE gathering（必须有 media 才能收集候选）
+        pc.createDataChannel('probe');
+
+        var offer = await pc.createOffer();
+        await pc.setLocalDescription(offer);
+
+        // 创建假对端触发完整 ICE gathering。
+        // 浏览器在没有 setRemoteDescription 时可能不会分配 TURN relay 候选，
+        // 需要通过一个 dummy PC 生成 answer 并设回主 PC 作为 remote description。
+        dummyPc = new RTCPeerConnection();
+        await dummyPc.setRemoteDescription(offer);
+        var answer = await dummyPc.createAnswer();
+        await dummyPc.setLocalDescription(answer);
+        await pc.setRemoteDescription(answer);
+    } catch (err) {
+        finish(false, '异常：' + (err.message || '连接失败'));
     }
 }
 

@@ -9,8 +9,8 @@ import (
 )
 
 // HandleSettings 传送设置 API
-// GET  → 返回当前设置（密码字段脱敏）
-// PUT  → 保存设置（密码为 "********" 时保留原密码）
+// GET  → 返回当前设置（密码字段由前端 type=password 遮罩，后端不再掩码）
+// PUT  → 保存设置
 func HandleSettings(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Cache-Control", "no-store")
@@ -18,10 +18,7 @@ func HandleSettings(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
 		settings := service.LoadSettings()
-		resp := *settings
-		resp.TurnPassword = maskPassword(settings.TurnPassword)
-		resp.TurnsPassword = maskPassword(settings.TurnsPassword)
-		json.NewEncoder(w).Encode(resp)
+		json.NewEncoder(w).Encode(settings)
 
 	case http.MethodPut:
 		var s service.AppSettings
@@ -29,14 +26,6 @@ func HandleSettings(w http.ResponseWriter, r *http.Request) {
 			w.WriteHeader(http.StatusBadRequest)
 			json.NewEncoder(w).Encode(map[string]string{"error": "无效的请求数据"})
 			return
-		}
-		// 密码字段为掩码值时保留原密码
-		existing := service.LoadSettings()
-		if s.TurnPassword == "********" {
-			s.TurnPassword = existing.TurnPassword
-		}
-		if s.TurnsPassword == "********" {
-			s.TurnsPassword = existing.TurnsPassword
 		}
 		// 回填默认值
 		if s.StunServer == "" {
@@ -58,7 +47,7 @@ func HandleSettings(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// HandleMaxFileSize 返回最大文件大小限制（供前端传输页面动态获取）
+// HandleMaxFileSize 返回最大文件大小限制
 func HandleMaxFileSize(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -71,11 +60,4 @@ func HandleMaxFileSize(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Cache-Control", "no-store")
 	json.NewEncoder(w).Encode(resp)
-}
-
-func maskPassword(pwd string) string {
-	if pwd == "" {
-		return ""
-	}
-	return "********"
 }

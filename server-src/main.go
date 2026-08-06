@@ -19,6 +19,7 @@ import (
 
 	"fn_qycs/handler"
 	"fn_qycs/service"
+	"fn_qycs/store"
 )
 
 //go:embed static/*
@@ -152,6 +153,9 @@ func main() {
 	log.Println("正在关闭...")
 	server.Close()
 
+	store.Close()
+	mainLogger("INFO", "数据库已关闭")
+
 	mainLogger("INFO", "========== 千盈传送 已关闭 ==========")
 }
 
@@ -248,9 +252,10 @@ func createSocketListener(sockPath string, handler http.Handler) {
 
 // tcpGatewayGuard 拦截 TCP 端口对 /gateway 管理面板的访问，
 // 确保 gateway 仅能通过飞牛统一网关（Unix Socket）访问。
+// 设置环境变量 GATEWAY_ALLOW_TCP=1 可临时开放 TCP 访问（调试用）。
 func tcpGatewayGuard(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if strings.HasPrefix(r.URL.Path, "/gateway") {
+		if strings.HasPrefix(r.URL.Path, "/gateway") && os.Getenv("GATEWAY_ALLOW_TCP") != "1" {
 			http.NotFound(w, r)
 			return
 		}
@@ -366,6 +371,9 @@ func init() {
 	dataDir := DataDir()
 	os.MkdirAll(dataDir, 0755)
 	log.Printf("数据目录: %s", dataDir)
+	// 初始化 SQLite 数据库（替代 JSON 文件存储）
+	store.DB()
+	log.Println("SQLite 数据库已就绪")
 }
 
 func getBackendPort() string {
@@ -424,10 +432,10 @@ func mainLogger(level, msg string) {
 // ---- 调试接口 ----
 
 type debugDevicesResp struct {
-	ActiveDevices  []*service.Device           `json:"activeDevices"`
-	OfflineDevices []*service.Device           `json:"offlineDevices"`
-	Connections    *handler.DebugWSInfo        `json:"connections"`
-	ServerAddrs    []string                    `json:"serverAddrs"`
+	ActiveDevices  []*service.Device    `json:"activeDevices"`
+	OfflineDevices []*service.Device    `json:"offlineDevices"`
+	Connections    *handler.DebugWSInfo `json:"connections"`
+	ServerAddrs    []string             `json:"serverAddrs"`
 }
 
 func handleDebugDevices(w http.ResponseWriter, r *http.Request) {

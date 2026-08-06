@@ -255,6 +255,44 @@ body {
 .mac-btn-primary:hover { opacity: .9; background: var(--gw-accent-hover); }
 .mac-btn-primary:active { opacity: .8; }
 .form-group { margin-bottom: 14px; }
+/* 输入框 + 按钮同行布局（TURN 测试按钮） */
+.form-input-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.form-input-row .form-input { flex: 1 1 160px; min-width: 160px; }
+/* 小型按钮（测试用） */
+.mac-btn-sm {
+    flex-shrink: 0;
+    padding: 5px 14px;
+    font-size: 12px;
+    font-weight: 500;
+    border: 1px solid var(--gw-border);
+    border-radius: 5px;
+    background: var(--gw-card-bg);
+    color: var(--gw-accent);
+    cursor: pointer;
+    transition: background .15s, border-color .15s;
+    line-height: 1.4;
+}
+.mac-btn-sm:hover { background: var(--gw-accent-bg); border-color: var(--gw-accent); }
+.mac-btn-sm:active { opacity: .8; }
+.mac-btn-sm:disabled { opacity: .5; cursor: not-allowed; }
+/* 测试结果文字（独立行，位于输入行下方） */
+.test-result {
+    margin-top: 8px;
+    padding: 6px 10px;
+    font-size: 12px;
+    font-weight: 500;
+    border-radius: 5px;
+    line-height: 1.5;
+    display: inline-block;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    max-width: 100%;
+}
+.test-result .test-icon { margin-right: 5px; font-weight: 700; }
+.test-result.success { color: var(--gw-success); background: var(--gw-success-bg); }
+.test-result.fail { color: var(--gw-danger); background: var(--gw-danger-bg); }
+.test-result.loading { color: var(--gw-text-secondary); background: transparent; padding-left: 0; }
 .form-help { font-size: 11px; color: var(--gw-text-tertiary); margin-top: 3px; }
 .form-row-2 { display: flex; gap: 12px; }
 .form-row-2 .form-group { flex: 1; min-width: 0; }

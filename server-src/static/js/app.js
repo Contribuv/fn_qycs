@@ -1,6 +1,6 @@
 // ===== 传送 =====
 
-const VERSION = '2.0.7';
+const VERSION = '2.1.0';
 
 const App = {
     ws: null,
@@ -18,6 +18,7 @@ const App = {
     reconnectTimer: null,
     _acceptHandlers: new Map(),
     _rejectHandlers: new Map(),
+    _acceptWaiters: new Map(), // taskId -> waitForAccept 的 resolve（本端取消时立即结束等待）
     _idb: null,
     _dbReady: null,
     _iceServers: null,
@@ -29,6 +30,7 @@ const App = {
     _renderTimer: null,   // renderDevices 防抖定时器
     _modeDetermined: false, // 网络模式是否已在 welcome 后确定（防止后续 report_lan 误翻转）
     _wakeLock: null,       // Screen Wake Lock 屏幕常亮
+    _hintedLanRoom: new Set(), // 房间成员被同网络发现的提示去重（服务器会在设备上线/report_lan/reEvaluate 等时机多次推送 device_list）
 
     $: (id) => document.getElementById(id),
 
@@ -112,9 +114,39 @@ const App = {
             } catch { /* 尝试下一个候选路径 */ }
         }
         this._iceServers = (data && data.iceServers) || [{ urls: 'stun:stun.l.google.com:19302' }];
+        // 仅 STUN 列表（直连优先用）：剔除 TURN/TURNS 中继，强制走 host/srflx 打洞
+        const direct = this._iceServers.filter(s => {
+            const urls = Array.isArray(s.urls) ? s.urls.join(',') : String(s.urls || '');
+            return !/turn:/i.test(urls);
+        });
+        this._iceServersDirect = direct.length ? direct : this._iceServers;
         // 拿到 ICE 配置后，主动补一次网络能力预判（首屏可能早于接口返回）
         this.probeNetworkCapability();
         return this._iceServers;
+    },
+
+    // 传输用 ICE 服务器决策：本机探测到 srflx（NAT 反射/可打洞）时优先直连（仅 STUN，
+    // 不含 TURN），避免明明能 NAT 穿透却误走 TURN 中继；否则/降级重试时用完整列表（TURN 兜底）。
+    // isSender=true 时支持 _forceTurn 强制走完整列表（直连失败后的 TURN 降级重试）。
+    async _getIceServersForConnection(isSender) {
+        const full = await this.fetchIceServers();
+        if (!isSender) {
+            // 接收端：必须始终包含 TURN。TURN 中继要求双方都向服务器分配 relay 候选，
+            // 接收端若剔除 TURN，发送端直连失败后降级中继将永远建立不起来。
+            // 直连优先不受影响：ICE 按候选优先级选 pair（host > srflx/prflx > relay），
+            // 带上 TURN 只是多一个兜底候选，不会抢在直连前面。
+            this._lastConnectUsedFull = true;
+            return { servers: full, useFull: true };
+        }
+        let useFull = this._natHasStunPublic !== true; // 探测未完成或本机无打洞能力 → TURN 兜底
+        if (this._forceTurn) {
+            useFull = true;
+            this._forceTurn = false;
+        }
+        this._lastConnectUsedFull = useFull;
+        if (useFull) return { servers: full, useFull: true };
+        const direct = (this._iceServersDirect && this._iceServersDirect.length) ? this._iceServersDirect : full;
+        return { servers: direct, useFull: false };
     },
 
     async fetchMaxFileSize() {
@@ -475,6 +507,7 @@ const App = {
         this.send({ type: 'room_leave' });
         this._room = null;
         this._roomDevices.clear();
+        this._hintedLanRoom.clear(); // 重置"同网络提示"记录，下次加入房间可重新提示
         this.renderRoomState();
     },
 
@@ -622,7 +655,8 @@ const App = {
             return addr.startsWith('10.') ||
                 addr.startsWith('192.168.') ||
                 /^172\.(1[6-9]|2\d|3[0-1])\./.test(addr) ||
-                addr.startsWith('169.254.'); // 链路本地
+                addr.startsWith('169.254.') || // 链路本地
+                addr.startsWith('100.64.');    // 运营商级 CGNAT 共享地址（打洞受限，非真正公网）
         };
         const isPublicV4 = (addr) => {
             if (!addr || addr.includes(':')) return false;
@@ -653,17 +687,28 @@ const App = {
                         if (isPublicV6(addr)) hasV6 = true;
                         else if (isPublicV4(addr)) hasPublicV4 = true;
                         else if (addr && isPrivateV4(addr) && !addr.startsWith('169.254.')) {
+                            // 多网卡（VPN/Docker/虚拟网卡）时按启发式选"最像真实局域网"的地址：
+                            // 192.168.* 优先，其次 10.*，最后 172.16-31.*，避免误报虚拟网卡 IP
                             if (!localLanIp) localLanIp = addr;
+                            else if (localLanIp.startsWith('172.') && (addr.startsWith('192.168.') || addr.startsWith('10.'))) localLanIp = addr;
+                            else if (localLanIp.startsWith('10.') && addr.startsWith('192.168.')) localLanIp = addr;
                         }
                     }
                     if (c.includes('typ srflx')) {
-                        hasStunPublic = true;
-                        if (!srflx4) {
-                            const m = c.match(/(?:candidate:)?\S+ \d+ \S+ \d+ (\d+\.\d+\.\d+\.\d+)/);
-                            if (m) srflx4 = m[1];
+                        // 仅当反射地址为公网才算具备打洞能力：
+                        // 级联 NAT / 内网 STUN 反射出的私网地址无法证明可对外打洞，
+                        // 避免误判"已获取公网地址"
+                        let saddr = (e.candidate.address || '').toLowerCase();
+                        if (!saddr) {
+                            const m = c.match(/(?:candidate:)?\S+ \d+ \S+ \d+ (\S+)/);
+                            if (m) saddr = m[1];
+                        }
+                        if (isPublicV4(saddr) || isPublicV6(saddr)) {
+                            hasStunPublic = true;
+                            if (!srflx4 && isPublicV4(saddr)) srflx4 = saddr;
                         }
                     }
-                    if (c.includes('typ relay')) hasStunPublic = true;
+                    // 注意：relay（TURN 中继）候选不算 STUN 打洞能力，避免把"仅配置 TURN"误判为"已获取公网地址"
                 };
                 pc.onicegatheringstatechange = () => { if (pc.iceGatheringState === 'complete') { clearTimeout(to); resolve(); } };
             });
@@ -701,14 +746,81 @@ const App = {
         if (!localLanIp && srflx4) localLanIp = srflx4;
         if (localLanIp) {
             this._localLanIp = localLanIp;
-            this.send({ type: 'report_lan', payload: { lanIp: localLanIp } });
+            // 静默上报：探测可能早于 WS 就绪，此时静默丢弃即可（WS 连接后服务器会重新评估）
+            this.send({ type: 'report_lan', payload: { lanIp: localLanIp } }, true);
         }
 
         // 保存探测结果供设备选择时回写
+        this._netCapProbed = true;
         this._natHasTurn = hasTurn;
         this._natHasV6 = hasV6;
         this._natHasPublicV4 = hasPublicV4;
         this._natHasStunPublic = hasStunPublic;
+        this._netCapLevel = level;
+        this._netCapMsg = msg;
+
+        // 后台验证 TURN 服务器实际可达性（Offer/Answer 触发 relay 候选分配）
+        // 仅当 ICE 配置中包含 TURN URL 时才验证；不阻塞首屏渲染
+        if (hasTurn) this._verifyTurnReachability();
+    },
+
+    // 后台异步验证 TURN 服务器是否真的能分配 relay 候选
+    // 使用 dummy PC 完成 Offer/Answer 握手以触发完整 ICE gathering（含 TURN 分配）
+    async _verifyTurnReachability() {
+        let relayFound = false;
+        try {
+            const pc = new RTCPeerConnection({ iceServers: this._iceServers || [] });
+            pc.createDataChannel('turnchk');
+            const done = new Promise(resolve => {
+                const to = setTimeout(() => { clearTimeout(to); resolve(); }, 12000);
+                pc.onicecandidate = (e) => {
+                    if (!e.candidate) { clearTimeout(to); resolve(); return; }
+                    const c = e.candidate.candidate || '';
+                    if (c.includes('typ relay')) { relayFound = true; clearTimeout(to); resolve(); }
+                };
+                pc.onicegatheringstatechange = () => {
+                    if (pc.iceGatheringState === 'complete') { clearTimeout(to); resolve(); }
+                };
+            });
+            const offer = await pc.createOffer();
+            await pc.setLocalDescription(offer);
+            // Dummy PC 完成 Offer/Answer，触发 iceServers 中的 TURN 分配
+            const dp = new RTCPeerConnection();
+            await dp.setRemoteDescription(offer);
+            const answer = await dp.createAnswer();
+            await dp.setLocalDescription(answer);
+            await pc.setRemoteDescription(answer);
+            await done;
+            try { pc.close(); } catch {}
+            try { dp.close(); } catch {}
+        } catch { /* 验证静默失败，保留原来的 URL-based 判定 */ }
+        if (!relayFound) {
+            // TURN URL 配置了但 relay 候选未出现 → TURN 不可达，修正标志和 UI
+            this._natHasTurn = false;
+            this._updateNetCapPill();
+            console.warn('[TURN] 服务器不可达，已标记 _natHasTurn=false');
+        }
+    },
+
+    // 根据当前探测结果刷新网络能力 Pill（_natHasTurn 变更后回写 UI）
+    _updateNetCapPill() {
+        const box = this.$('netCapPill');
+        const text = this.$('netCapPillText');
+        if (!box || !text) return;
+        let level, msg;
+        if (this._natHasStunPublic) {
+            level = 'ok'; msg = '本机网络可跨网互传（已获取公网地址）';
+        } else if (this._natHasV6) {
+            level = 'ok'; msg = '本机具备公网 IPv6，可跨网直连';
+        } else if (this._natHasPublicV4) {
+            level = 'ok'; msg = '本机具备公网 IPv4，可跨网直连';
+        } else if (this._natHasTurn) {
+            level = 'ok'; msg = '已配置 TURN 中继，可跨网互传';
+        } else {
+            level = 'warn'; msg = '未配置 TURN 中继，跨网穿透可能失败';
+        }
+        box.dataset.level = level;
+        text.textContent = msg;
         this._netCapLevel = level;
         this._netCapMsg = msg;
     },
@@ -724,7 +836,7 @@ const App = {
         } else {
             box.dataset.level = 'error';
             text.textContent = this._natHasTurn
-                ? '本次跨网连接失败：NAT 穿透不可用'
+                ? '本次跨网连接失败：直连与 TURN 中继均不可用'
                 : '未配置 TURN 中继，本次跨网连接失败';
         }
     },
@@ -767,44 +879,8 @@ const App = {
 
     // 房间内 WebRTC（通过房间信令）
     async sendFileP2PRoom(file, taskId, toId) {
-        const iceServers = await this.fetchIceServers();
-        const pc = new RTCPeerConnection({ iceServers });
-        const dc = pc.createDataChannel('file', { ordered: true });
-        dc.onmessage = (event) => {
-            let msg = null;
-            try { msg = JSON.parse(event.data); } catch {}
-            if (msg && msg.type === 'done_ack' && this._sendDoneAckResolve) {
-                this._sendDoneAckResolve();
-                this._sendDoneAckResolve = null;
-            }
-        };
-        // Trickle ICE：候选边收集边转发，不再等待 gathering complete，降低握手延迟
-        pc.onicecandidate = (e) => {
-            if (e.candidate) {
-                this.send({ type: 'room_webrtc_candidate', payload: { toId, taskId, candidate: e.candidate.toJSON() } });
-            }
-        };
-        pc.onconnectionstatechange = () => {
-            this._onConnectionState(pc, true, 'send-room');
-        };
-        dc.onclose = () => { this._stopDcHeartbeat(dc); };
-        this._sendPC = pc;
-        this._sendDC = dc;
-        this._sendTaskId = taskId;
-
+        const { pc, dc } = await this._connectWithRetry(toId, taskId, true);
         try {
-            const dcReady = new Promise((resolve, reject) => {
-                dc.onopen = () => { this._startDcHeartbeat(dc); if (this._lastViaTurn !== undefined) this.setNetCapResult(true, this._lastViaTurn); resolve(); };
-                dc.onerror = () => reject(new Error('连接失败'));
-                setTimeout(() => reject(new Error('连接建立超时（45s），网络可能受限')), 45000);
-            });
-
-            const offer = await pc.createOffer();
-            await pc.setLocalDescription(offer);
-            // Trickle：立即发出 offer（不含完整候选），后续候选通过 room_webrtc_candidate 补发
-            this.send({ type: 'room_webrtc_offer', payload: { toId, taskId, sdp: pc.localDescription.toJSON() } });
-            await dcReady;
-
             dc.send(JSON.stringify({ type: 'meta', name: file.name, size: file.size, mime: file.type }));
 
             const chunkSize = 256 * 1024;
@@ -821,10 +897,25 @@ const App = {
             // （大文件传输中 DC 异常时该事件不触发，导致 30s 超时死等 → send buffer timeout）
             const waitForLow = (timeoutMs = 30000) => {
                 const start = Date.now();
+                let disconnectedSince = 0;
                 return new Promise((resolve, reject) => {
                     const check = () => {
+                        const cs = pc.connectionState;
                         if (dc.readyState === 'closed' || dc.readyState === 'closing') {
-                            return reject(new Error('send buffer timeout (DC closed)'));
+                            return reject(new Error('发送中断：连接已关闭'));
+                        }
+                        if (cs === 'failed') {
+                            return reject(new Error('发送中断：ICE 连接失败'));
+                        }
+                        if (cs === 'disconnected') {
+                            // 暂时断连（NAT 映射回收 / 中继链路抖动）：等 12s 恢复，超过则判定中断，
+                            // 与接收端 10s 重连等待窗口协调，避免发送端死等 30s 后才发现，导致"传一半"无响应
+                            if (!disconnectedSince) disconnectedSince = Date.now();
+                            else if (Date.now() - disconnectedSince > 12000) {
+                                return reject(new Error('发送中断：连接长时间断开'));
+                            }
+                        } else {
+                            disconnectedSince = 0; // 已恢复 connected
                         }
                         if (dc.bufferedAmount <= LOW_WATERMARK) return resolve();
                         if (Date.now() - start > timeoutMs) return reject(new Error('send buffer timeout'));
@@ -865,20 +956,36 @@ const App = {
                 }
             }
 
+            // 发送完成信号：先等缓冲降至低水位，确保 done 能进入发送队列
+            // （缓冲满时 dc.send 会抛异常导致 done 丢失 → 接收端"收不完"）；短超时兜底，
+            // 连接异常时 waitForLow 抛错由外层 try 捕获，走自动重连重传。
+            try { await waitForLow(15000); } catch (e) { throw e; }
             dc.send(JSON.stringify({ type: 'done' }));
 
-            // 等待缓冲区 flush（最多 5 秒）
-            const flushStart = Date.now();
-            while (dc.bufferedAmount > 0 && Date.now() - flushStart < 5000) {
-                await new Promise(r => setTimeout(r, 10));
-            }
-
-            // 短暂等待 ack（最多 3s），不阻塞主流程
-            const ackPromise = new Promise(resolve => {
-                this._sendDoneAckResolve = () => { resolve(true); this._sendDoneAckResolve = null; };
-                setTimeout(() => { if (this._sendDoneAckResolve) this._sendDoneAckResolve = null; resolve(false); }, 3000);
+            // 等待接收端确认（done_ack）：与 sendFileP2P 一致。
+            // 慢速连接（TURN 中继）下最后一批数据可能在缓冲中，且接收端落盘需要时间；
+            // 若 5s+3s 就关闭连接，会导致发送端误报完成、接收端仍在接收后报错。
+            const acked = await new Promise(resolve => {
+                let settled = false;
+                const done = (ok) => { if (!settled) { settled = true; resolve(ok); } };
+                this._sendDoneAckResolve = () => done(true);
+                const poll = () => {
+                    if (settled) return;
+                    if (dc.readyState === 'closed' || dc.readyState === 'closing' || pc.connectionState === 'failed') {
+                        return done(false); // 连接已断开，无法收到确认
+                    }
+                    if (dc.bufferedAmount > 0) return setTimeout(poll, 20);
+                    setTimeout(poll, 50);
+                };
+                poll();
+                setTimeout(() => done(false), 60000);
             });
-            await ackPromise;
+            this._sendDoneAckResolve = null;
+            if (acked) {
+                this.toast('对方已确认接收完成', 'success');
+            } else {
+                this.toast('发送完成，但未收到对方确认（请检查接收端文件是否完整）', 'info');
+            }
         } finally {
             this._stopDcHeartbeat(dc);
             this._sendDoneAckResolve = null;
@@ -1002,10 +1109,10 @@ const App = {
         this.send({ type: 'request_device_list' });
         this.toast('正在搜索设备…', 'info');
     },
-    send(msg) {
+    send(msg, silent = false) {
         if (this.ws?.readyState === WebSocket.OPEN) {
             this.ws.send(JSON.stringify(msg));
-        } else {
+        } else if (!silent) {
             console.warn('[WS] 连接未就绪，无法发送:', msg.type);
             this.toast('连接未就绪，请稍后重试', 'error');
         }
@@ -1155,9 +1262,14 @@ const App = {
                     this.devices.set(d.id, d);
                 } else {
                     newIds.add(d.id);
-                    // v2.0.7：房间成员被同网络发现，提示可直接局域网互传（无需走房间）
+                    // v2.0.7：房间成员被同网络发现，提示可直接局域网互传（无需走房间）。
+                    // 服务器会多次推送 device_list（设备上线、report_lan 回推、reEvaluate 等），
+                    // 同一设备只提示一次，避免重复 toast。
                     if (d.matchType && (d.matchType === 'local_lan' || d.matchType === 'same_public_ip')) {
-                        this.toast(`${d.name} 与你在同一网络，退出房间可直连更快`, 'info');
+                        if (!this._hintedLanRoom.has(d.id)) {
+                            this._hintedLanRoom.add(d.id);
+                            this.toast(`${d.name} 与你在同一网络，退出房间可直连更快`, 'info');
+                        }
                     }
                 }
             }
@@ -1420,6 +1532,13 @@ const App = {
         const target = this.getTarget(id);
         if (!target) { box.dataset.level = 'unknown'; text.textContent = '设备已离线'; return; }
 
+        // 网络能力探测尚未完成：不给出"无法传输"等悲观结论，提示检测中即可
+        if (!this._netCapProbed) {
+            box.dataset.level = 'unknown';
+            text.textContent = '正在检测网络能力…';
+            return;
+        }
+
         // 服务器附带的匹配维度标记（v2.0.6 新增）
         const mt = target.matchType || '';
 
@@ -1430,13 +1549,13 @@ const App = {
             return;
         }
 
-        // 维度3（same_public_ip）：同公网出口但可能不在同一子网，需 STUN 穿透
+        // 维度3（same_public_ip）：同公网出口但可能不在同一子网，优先 STUN 穿透直连
         if (mt === 'same_public_ip') {
             box.dataset.level = 'warn';
-            if (this._natHasTurn) {
+            if (this._natHasStunPublic) {
+                text.textContent = '同公网出口，STUN 穿透直连';
+            } else if (this._natHasTurn) {
                 text.textContent = '同公网出口，可通过 TURN 中继';
-            } else if (this._natHasStunPublic) {
-                text.textContent = '同公网出口，STUN 穿透可用';
             } else {
                 text.textContent = '同公网出口，将尝试 STUN 穿透';
             }
@@ -1483,16 +1602,20 @@ const App = {
             }
         }
 
-        // 跨网络：根据本机探测能力 + 服务端 ICE 配置，给出精确的连接方式判断
-        if (this._natHasTurn) {
-            box.dataset.level = 'ok';
-            text.textContent = '跨网络，可使用 TURN 中继';
-        } else if (this._natHasV6) {
+        // 跨网络：直连能力优先（IPv6 直连 > 公网 IPv4 直连 > STUN NAT 穿透），
+        // TURN 中继仅作最后兜底提示，避免"明明能直连却提示走慢速中继"误导用户
+        if (this._natHasV6) {
             box.dataset.level = 'ok';
             text.textContent = '跨网络，可通过公网 IPv6 直连';
+        } else if (this._natHasPublicV4) {
+            box.dataset.level = 'ok';
+            text.textContent = '跨网络，可通过公网 IPv4 直连';
         } else if (this._natHasStunPublic) {
             box.dataset.level = 'warn';
-            text.textContent = '跨网络 STUN 穿透（已获取公网地址）';
+            text.textContent = '跨网络，STUN 穿透直连（已获取公网地址）';
+        } else if (this._natHasTurn) {
+            box.dataset.level = 'ok';
+            text.textContent = '跨网络，可使用 TURN 中继';
         } else {
             box.dataset.level = 'error';
             text.textContent = '未配置 TURN 中继，无法传输';
@@ -1517,13 +1640,17 @@ const App = {
 
         this.centerToast(`正在发起连接到 ${target.name}…`, 'info');
 
-        // v2.0.6：跨网络传输且无 TURN 中继时，前置提醒用户（不阻止操作，STUN 穿透仍有成功可能）
-        const isCrossNet = (this._room && this._roomDevices.has(target.id)) || target.matchType === 'same_public_ip';
-        if (isCrossNet && !this._natHasTurn && !this._natHasV6) {
+        // v2.0.6：跨网络传输且无直连能力（TURN/公网 IPv6/公网 IPv4 均无）时，前置提醒用户。
+        // 有任一直接通路时不再提示"未配置 TURN 中继"，避免误导。
+        const lanTypes = ['local_lan', 'server_lan', 'private_prefix', 'cross_lan'];
+        const isRoomCrossNet = this._room && this._roomDevices.has(target.id) && !lanTypes.includes(target.matchType);
+        const isCrossNet = isRoomCrossNet || target.matchType === 'same_public_ip';
+        if (isCrossNet && !this._natHasTurn && !this._natHasV6 && !this._natHasPublicV4) {
             this.toast('未配置 TURN 中继，穿透若失败请在「传送设置」中配置', 'info');
         }
 
         this.activeUpload = true;
+        this._sendCancelled = false; // 本轮发送的取消标记（cancelTransfer 置位，循环/重传据此立即停止）
         this.updateSendBar();
         this.requestWakeLock();  // 传输期间保持屏幕常亮
 
@@ -1550,6 +1677,9 @@ const App = {
                 this.openProgress(file.name, label);
 
                 const taskId = Date.now() + '-' + Math.random().toString(36).substr(2, 9);
+                // 立即记录当前任务，否则等待接收方确认阶段 _sendTaskId 仍为 null，
+                // 此时点取消 cancelTransfer 拿不到 taskId，transfer_cancel 发不出去
+                this._sendTaskId = taskId;
 
                 // 通过 WS 发送传输请求（服务器只做信令转发）
                 this.send({
@@ -1557,16 +1687,42 @@ const App = {
                     payload: { taskId, fileName: file.name, fileSize: file.size, toId: target.id, fromId: this.deviceId, fromName: this.deviceName, index: fi, total: files.length }
                 });
 
-                const accepted = await this.waitForAccept(taskId, 60000);
-                if (!accepted) { this.toast(`${target.name} 拒绝了 ${file.name}`, 'info'); this.closeProgress(); continue; }
+                const acceptResult = await this.waitForAccept(taskId, 60000);
+                if (this._sendCancelled) { this.closeProgress(); break; } // 本端已取消
+                if (acceptResult === 'timeout') { this.toast(`${target.name} 未响应，已跳过 ${file.name}`, 'info'); this.closeProgress(); continue; }
+                if (acceptResult !== 'accepted') { this.toast(`${target.name} 拒绝了 ${file.name}`, 'info'); this.closeProgress(); continue; }
 
-                // P2P 直传：文件数据通过 WebRTC DataChannel，不经过服务器
-                if (this._room && this._roomDevices.has(target.id)) {
-                    await this.sendFileP2PRoom(file, taskId, target.id);
-                } else {
-                    await this.sendFileP2P(file, taskId, target.id);
+                // P2P 直传：文件数据通过 WebRTC DataChannel，不经过服务器。
+                // 断流自动重连重传：TURN 中继抖动 / NAT 映射被回收导致传输中途断开时，
+                // 自动重建连接并重传当前文件（接收端收到新 offer 会清理旧连接、重置状态后重新接收），
+                // 最多重试 2 次，避免跨网传输一断流就只能报错重来。
+                let sendErr = null;
+                for (let attempt = 0; attempt < 3; attempt++) {
+                    try {
+                        if (this._room && this._roomDevices.has(target.id)) {
+                            await this.sendFileP2PRoom(file, taskId, target.id);
+                        } else {
+                            await this.sendFileP2P(file, taskId, target.id);
+                        }
+                        sendErr = null;
+                        break;
+                    } catch (err) {
+                        sendErr = err;
+                        // 本端已取消：即使传输中断也不再重传，立即结束
+                        if (this._sendCancelled) break;
+                        if (!this._isConnDroppedError(err) || attempt >= 2) break;
+                        console.warn(`[startSend] 传输中断，自动重连重传 ${file.name}（第 ${attempt + 2}/3 次尝试）:`, err.message);
+                        this.centerToast(`连接中断，正在自动重连重传 ${file.name}…`, 'info');
+                        // 稍等片刻，让接收端清理旧连接、释放旧连接相关资源
+                        await new Promise(r => setTimeout(r, 1500));
+                    }
                 }
-                this.showProgressDone();
+                if (sendErr) {
+                    lastErr = sendErr;
+                    this.closeProgress();
+                } else {
+                    this.showProgressDone();
+                }
             } catch (err) {
                 lastErr = err;
                 this.closeProgress();
@@ -1584,19 +1740,54 @@ const App = {
         this.cleanupAllTransfers();
     },
 
+    // 返回 'accepted' / 'rejected' / 'timeout' / 'cancelled'（本端主动取消），
+    // 区分对方明确拒绝、超时未响应与本端取消
     waitForAccept(taskId, timeout) {
         return new Promise(resolve => {
-            const timer = setTimeout(() => { this._acceptHandlers.delete(taskId); this._rejectHandlers.delete(taskId); resolve(false); }, timeout);
-            this._acceptHandlers.set(taskId, () => { clearTimeout(timer); this._acceptHandlers.delete(taskId); this._rejectHandlers.delete(taskId); resolve(true); });
-            this._rejectHandlers.set(taskId, () => { clearTimeout(timer); this._acceptHandlers.delete(taskId); this._rejectHandlers.delete(taskId); resolve(false); });
+            this._acceptWaiters.set(taskId, resolve);
+            const timer = setTimeout(() => { this._acceptWaiters.delete(taskId); this._acceptHandlers.delete(taskId); this._rejectHandlers.delete(taskId); resolve('timeout'); }, timeout);
+            this._acceptHandlers.set(taskId, () => { clearTimeout(timer); this._acceptWaiters.delete(taskId); this._acceptHandlers.delete(taskId); this._rejectHandlers.delete(taskId); resolve('accepted'); });
+            this._rejectHandlers.set(taskId, () => { clearTimeout(timer); this._acceptWaiters.delete(taskId); this._acceptHandlers.delete(taskId); this._rejectHandlers.delete(taskId); resolve('rejected'); });
         });
     },
 
-    // WebRTC P2P 发送
-    async sendFileP2P(file, taskId, toId) {
-        const iceServers = await this.fetchIceServers();
-        const pc = new RTCPeerConnection({ iceServers });
+    // 传输中断类错误（可自动重连重传）：背压超时、连接被关闭、ICE 失败、长时间断开。
+    // 仅这些错误触发重传；用户取消/拒绝/文件读取失败等不重试。
+    _isConnDroppedError(err) {
+        const m = (err && err.message) || '';
+        return m.includes('send buffer timeout') ||
+            m.includes('发送中断：连接已关闭') ||
+            m.includes('发送中断：ICE 连接失败') ||
+            m.includes('发送中断：连接长时间断开');
+    },
+
+    // 建立发送端 WebRTC 连接（仅建立连接并等待 DataChannel 打开，不含文件数据发送）
+    // isRoom=true 走房间信令；返回 { pc, dc }。直连模式（无 TURN）失败/超时会静默抛错，
+    // 交由 _connectWithRetry 决定是否降级 TURN；完整模式失败则正常走 _onConnectionState 报错路径。
+    async _connectSendPC(toId, taskId, isRoom) {
+        const candType = isRoom ? 'room_webrtc_candidate' : 'webrtc_candidate';
+        const offerType = isRoom ? 'room_webrtc_offer' : 'webrtc_offer';
+        const isCross = !!(this._room && this._roomDevices.has(toId));
+        const cfg = await this._getIceServersForConnection(true);
+        const pc = new RTCPeerConnection({ iceServers: cfg.servers });
         const dc = pc.createDataChannel('file', { ordered: true });
+        let rejectDcReady;
+        let connectTimer, finalTimer;
+        const dcReady = new Promise((resolve, reject) => {
+            dc.onopen = () => {
+                clearTimeout(connectTimer);
+                clearTimeout(finalTimer);
+                this._startDcHeartbeat(dc);
+                if (this._lastViaTurn !== undefined) this.setNetCapResult(true, this._lastViaTurn);
+                resolve();
+            };
+            dc.onerror = () => {
+                clearTimeout(connectTimer);
+                clearTimeout(finalTimer);
+                reject(new Error('连接失败'));
+            };
+            rejectDcReady = reject;
+        });
         dc.onmessage = (event) => {
             let msg = null;
             try { msg = JSON.parse(event.data); } catch {}
@@ -1608,33 +1799,87 @@ const App = {
         // Trickle ICE：候选边收集边转发
         pc.onicecandidate = (e) => {
             if (e.candidate) {
-                this.send({ type: 'webrtc_candidate', payload: { toId, taskId, candidate: e.candidate.toJSON() } });
+                this.send({ type: candType, payload: { toId, taskId, candidate: e.candidate.toJSON() } });
             }
         };
         pc.onconnectionstatechange = () => {
-            this._onConnectionState(pc, !!(this._room && this._roomDevices.has(toId)), 'send');
+            // 已被重试/取消清理的旧连接：忽略其状态回调，避免取消或重建后误报"跨网连接失败"
+            if (this._sendPC !== pc) return;
+            const state = pc.connectionState;
+            if (state === 'connected') {
+                this._onConnectionState(pc, isCross, 'send');
+            } else if (state === 'failed') {
+                clearTimeout(connectTimer);
+                clearTimeout(finalTimer);
+                if (!cfg.useFull) {
+                    // 直连（无 TURN）失败：不弹错误提示，静默抛错交由 _connectWithRetry 降级 TURN
+                    rejectDcReady(new Error('直连穿透失败'));
+                } else {
+                    this._onConnectionState(pc, isCross, 'send');
+                    rejectDcReady(new Error('ICE 连接失败'));
+                }
+            }
         };
         dc.onclose = () => { this._stopDcHeartbeat(dc); };
         this._sendPC = pc;
         this._sendDC = dc;
         this._sendTaskId = taskId;
 
+        // 连接超时：直连模式 12s（快速降级 TURN），完整模式 30s；另有 45s 最终兜底
+        const connectTimeout = cfg.useFull ? 30000 : 12000;
+        connectTimer = setTimeout(() => {
+            if (pc.connectionState !== 'connected') rejectDcReady(new Error(cfg.useFull ? '连接建立超时' : '直连建立超时'));
+        }, connectTimeout);
+        finalTimer = setTimeout(() => rejectDcReady(new Error('连接建立超时（45s），网络可能受限')), 45000);
+
+        // 创建 offer，Trickle：立即发送 offer，候选后续通过信令补发
+        const offer = await pc.createOffer();
+        await pc.setLocalDescription(offer);
+        this.send({ type: offerType, payload: { toId, taskId, sdp: pc.localDescription.toJSON() } });
+
+        await dcReady;
+        return { pc, dc };
+    },
+
+    // 发送端连接重试：直连（仅 STUN，NAT 打洞）失败后自动降级为完整列表（TURN 中继）重试一次
+    async _connectWithRetry(toId, taskId, isRoom) {
         try {
-            // 等待 DataChannel 打开
-            const dcReady = new Promise((resolve, reject) => {
-                dc.onopen = () => { this._startDcHeartbeat(dc); resolve(); };
-                dc.onerror = () => reject(new Error('连接失败'));
-                setTimeout(() => reject(new Error('连接建立超时（45s），网络可能受限')), 45000);
-            });
+            const r = await this._connectSendPC(toId, taskId, isRoom);
+            // 无论直连成功还是降级 TURN 成功，都重置重试标记，
+            // 否则多文件场景下第一个文件降级成功后，后续文件直连失败时无法再次降级 → 中途失败
+            this._sendRetriedTurn = false;
+            return r;
+        } catch (e) {
+            // 任何失败路径都先清理未成功的 PC/DC，避免连接泄漏、
+            // 残留引用导致下一次传输错连旧连接（onWebrtcAnswer 用 this._sendPC 回设远端描述）
+            if (this._sendPC) {
+                try { this._sendPC.close(); } catch {}
+                this._sendPC = null;
+            }
+            if (this._sendDC) {
+                this._stopDcHeartbeat(this._sendDC);
+                try { this._sendDC.close(); } catch {}
+                this._sendDC = null;
+            }
+            // 本机无可打洞能力时第一次就用了完整列表，无需（也无法）降级
+            if (this._lastConnectUsedFull) throw e;
+            if (this._sendRetriedTurn) { this._sendRetriedTurn = false; throw e; }
+            this._sendRetriedTurn = true;
+            this._forceTurn = true;
+            this.toast('直连尚未建立，尝试 TURN 中继兜底...', 'info');
+            try {
+                return await this._connectSendPC(toId, taskId, isRoom);
+            } catch (e2) {
+                this._sendRetriedTurn = false;
+                throw e2;
+            }
+        }
+    },
 
-            // 创建 offer，Trickle：立即发送 offer，候选后续通过 webrtc_candidate 补发
-            const offer = await pc.createOffer();
-            await pc.setLocalDescription(offer);
-            this.send({ type: 'webrtc_offer', payload: { toId, taskId, sdp: pc.localDescription.toJSON() } });
-
-            // 等待 DataChannel 就绪
-            await dcReady;
-
+    // WebRTC P2P 发送
+    async sendFileP2P(file, taskId, toId) {
+        const { pc, dc } = await this._connectWithRetry(toId, taskId, false);
+        try {
             // 发送文件元信息
             dc.send(JSON.stringify({ type: 'meta', name: file.name, size: file.size, mime: file.type }));
 
@@ -1655,10 +1900,25 @@ const App = {
             // （大文件传输中 DC 异常时该事件不触发，导致 30s 超时死等 → send buffer timeout）
             const waitForLow = (timeoutMs = 30000) => {
                 const start = Date.now();
+                let disconnectedSince = 0;
                 return new Promise((resolve, reject) => {
                     const check = () => {
+                        const cs = pc.connectionState;
                         if (dc.readyState === 'closed' || dc.readyState === 'closing') {
-                            return reject(new Error('send buffer timeout (DC closed)'));
+                            return reject(new Error('发送中断：连接已关闭'));
+                        }
+                        if (cs === 'failed') {
+                            return reject(new Error('发送中断：ICE 连接失败'));
+                        }
+                        if (cs === 'disconnected') {
+                            // 暂时断连（NAT 映射回收 / 中继链路抖动）：等 12s 恢复，超过则判定中断，
+                            // 与接收端 10s 重连等待窗口协调，避免发送端死等 30s 后才发现，导致"传一半"无响应
+                            if (!disconnectedSince) disconnectedSince = Date.now();
+                            else if (Date.now() - disconnectedSince > 12000) {
+                                return reject(new Error('发送中断：连接长时间断开'));
+                            }
+                        } else {
+                            disconnectedSince = 0; // 已恢复 connected
                         }
                         if (dc.bufferedAmount <= LOW_WATERMARK) return resolve();
                         if (Date.now() - start > timeoutMs) return reject(new Error('send buffer timeout'));
@@ -1703,24 +1963,38 @@ const App = {
                 }
             }
 
-            // 发送完成信号：发送端在"done 已发出 + 缓冲区已 flush"即视为发送完成，
-            // 不阻塞等待对方 ack。ack 仅作为确认提示，5s 内收到则提示，否则静默。
+            // 发送完成信号：先等缓冲降至低水位，确保 done 能进入发送队列
+            // （缓冲满时 dc.send 会抛异常导致 done 丢失 → 接收端"收不完"）；短超时兜底，
+            // 连接异常时 waitForLow 抛错由外层 try 捕获，走自动重连重传。
+            try { await waitForLow(15000); } catch (e) { throw e; }
             dc.send(JSON.stringify({ type: 'done' }));
 
-            // 等待缓冲区数据全部发送完毕（最多 5 秒）
-            const flushStart = Date.now();
-            while (dc.bufferedAmount > 0 && Date.now() - flushStart < 5000) {
-                await new Promise(r => setTimeout(r, 10));
-            }
-
-            // 短暂等待 ack（最多 3s），不影响主流程：收到则提示，未收到也按完成返回
-            const ackPromise = new Promise(resolve => {
-                this._sendDoneAckResolve = () => { resolve(true); this._sendDoneAckResolve = null; };
-                setTimeout(() => { if (this._sendDoneAckResolve) this._sendDoneAckResolve = null; resolve(false); }, 3000);
+            // 等待接收端确认（done_ack）：收到即双方完成，此时才能安全关闭连接。
+            // 慢速连接（TURN 中继）下最后一批分片 + done 可能仍在缓冲未发出，
+            // 且接收端落盘（写磁盘 + IndexedDB）需要时间——若按旧逻辑 5s+3s 就关闭连接，
+            // 会造成"发送端误报完成、接收端还在接收/落盘、随后报网络错误"。
+            // 60s 超时兜底 + 连接断开/失败提前结束；未收到 ack 时明确提示未确认。
+            const acked = await new Promise(resolve => {
+                let settled = false;
+                const done = (ok) => { if (!settled) { settled = true; resolve(ok); } };
+                this._sendDoneAckResolve = () => done(true);
+                const poll = () => {
+                    if (settled) return;
+                    if (dc.readyState === 'closed' || dc.readyState === 'closing' || pc.connectionState === 'failed') {
+                        return done(false); // 连接已断开，无法收到确认
+                    }
+                    if (dc.bufferedAmount > 0) return setTimeout(poll, 20); // 数据仍在发出，继续等
+                    setTimeout(poll, 50); // 缓冲区已清空，等接收端落盘后回 ack
+                };
+                poll();
+                setTimeout(() => done(false), 60000);
             });
-            const acked = await ackPromise;
-            if (acked) this.toast('对方已确认接收完成', 'success');
-            // 注意：此处不再抛错、不再卡 60s，函数直接进入 finally 清理资源并返回
+            this._sendDoneAckResolve = null;
+            if (acked) {
+                this.toast('对方已确认接收完成', 'success');
+            } else {
+                this.toast('发送完成，但未收到对方确认（请检查接收端文件是否完整）', 'info');
+            }
         } finally {
             // 确保资源清理（即使异常也不泄漏）
             this._stopDcHeartbeat(dc);
@@ -1739,7 +2013,19 @@ const App = {
     // 对方取消了传输：关闭连接，更新状态，避免误判为连接异常
     onTransferCancel(payload) {
         console.log('[Transfer] 对方取消了传输:', payload?.taskId);
-        this.updateReceiveStatus('failed');
+        // 若接收端仍停留在"接收确认框"（用户尚未点接受），必须一并关闭并清空 pendingReceive，
+        // 否则确认框残留，用户点"接受"后仍进入"接收中"却永远等不到数据（发送端已取消）
+        this.pendingReceive = null;
+        this.$('receiveOverlay').classList.add('hidden');
+        // 更新接收历史状态：取消时 _recvTaskId 可能尚未设置（确认框/等待 offer 阶段），
+        // 直接用 payload.taskId 匹配，确保"接收中"状态被正确标记为失败
+        const cancelTaskId = payload?.taskId;
+        if (cancelTaskId) {
+            const item = this.receiveHistory.find(i => i.taskId === cancelTaskId);
+            if (item) { item.status = 'failed'; this.renderReceiveList(); }
+        } else {
+            this.updateReceiveStatus('failed');
+        }
         this.closeProgress();
         this.cleanupAllTransfers();
         this.toast('对方已取消传输', 'info');
@@ -1759,10 +2045,9 @@ const App = {
         });
     },
 
-    // 跨网络策略：仅支持「公网 IPv6 ↔ 公网 IPv6 直连」或「用户自建 TURN 中继」。
     // 连接建立后通过 getStats 读取最终选定的 candidate-pair，判断实际通路类型。
-    // 仅在跨网络（remote 作用域，即房间寻址）时做"不支持"判定；局域网直连属正常场景。
-    async _analyzeConnection(pc, isCrossNetwork, viaTurn) {
+    // 仅在跨网络（remote 作用域，即房间寻址）时提示；局域网直连属正常场景不打扰。
+    async _analyzeConnection(pc, isCrossNetwork) {
         let pair = null;
         const candidates = new Map();
         try {
@@ -1787,53 +2072,57 @@ const App = {
         const remote = candidates.get(pair.remoteCandidateId);
         const localType = local ? local.candidateType : '';
         const remoteType = remote ? remote.candidateType : '';
-        const localIsV6 = !!(local && local.address && local.address.includes(':'));
-        const remoteIsV6 = !!(remote && remote.address && remote.address.includes(':'));
         const isRelay = localType === 'relay' || remoteType === 'relay';
+        // 供 DC onopen 统一回写 Pill：走 TURN 时不能误显示"直连"
+        this._lastViaTurn = isRelay;
 
-        if (isCrossNetwork) {
-            if (isRelay) {
-                // 走 TURN 中继（用户自建），提示中继模式
-                this.toast('已通过 TURN 中继连接（非直连）', 'info');
-            } else if (localType === 'host' && remoteType === 'host' && localIsV6 && remoteIsV6) {
-                // 公网 IPv6 直连，理想路径
-                this.toast('已通过公网 IPv6 直连', 'success');
+        // 公网 IPv6（2000::/3）：排除链路本地( fe80 )/ ULA( fc00::/7 )/ 回环( ::1 )
+        const isPublicV6 = (addr) => {
+            if (!addr || !addr.includes(':')) return false;
+            const a = String(addr).toLowerCase();
+            if (a.startsWith('fe80') || a.startsWith('fc') || a.startsWith('fd') || a === '::1') return false;
+            return /^2[0-9a-f]/.test(a) || /^3[0-9a-f]/.test(a);
+        };
+        // 私网 IPv4（用于区分"局域网直连"与"公网 IPv4 直连"；含 CGNAT 共享地址）
+        const isPrivateV4 = (addr) => {
+            if (!addr || addr.includes(':')) return false;
+            return addr.startsWith('10.') || addr.startsWith('192.168.') ||
+                /^172\.(1[6-9]|2\d|3[0-1])\./.test(addr) || addr.startsWith('169.254.') ||
+                addr.startsWith('100.64.'); // CGNAT 共享地址
+        };
+        const localIsPublicV6 = !!(local && isPublicV6(local.address));
+        const remoteIsPublicV6 = !!(remote && isPublicV6(remote.address));
+
+        if (!isCrossNetwork) return;
+
+        if (isRelay) {
+            // 走 TURN 中继：说明 host/srflx 直连未能建立，中继是兜底通路（用户自建）
+            this.toast('已通过 TURN 中继连接（直连未建立）', 'info');
+        } else if (localIsPublicV6 || remoteIsPublicV6) {
+            // 选中 pair 任一方为公网 IPv6：host/srflx 均属 IPv6 直连，无需 NAT 打洞或 TURN
+            this.toast('已通过公网 IPv6 直连', 'success');
+        } else if (localType === 'srflx' || remoteType === 'srflx' || localType === 'prflx' || remoteType === 'prflx') {
+            // srflx/prflx（IPv4）：STUN NAT 打洞直连成功，未走 TURN 中继
+            this.toast('已通过 NAT 穿透直连', 'success');
+        } else if (localType === 'host' && remoteType === 'host') {
+            // host+host 非 relay 非 IPv6：双方公网 IPv4 直连，或房间内同局域网成员被标为跨网
+            if (isPrivateV4(local.address) || isPrivateV4(remote.address)) {
+                this.toast('已直连（局域网 host 直连）', 'success');
             } else {
-                // 连接已成功但通路既非 IPv6 直连也非 TURN 中继：实际已可传，仅做信息提示，不报错阻断
-                console.warn('[analyze] 跨网络连接成功，但通路类型非预期:', { localType, remoteType, localIsV6, remoteIsV6 });
-                this.toast('跨网连接已建立（通路类型：' + (localType || '?') + '/' + (remoteType || '?') + '）', 'info');
+                this.toast('已通过公网 IPv4 直连', 'success');
             }
+        } else {
+            // 连接已成功但通路类型未知：仅信息提示，不报错阻断
+            console.warn('[analyze] 跨网络连接成功，但通路类型非预期:', { localType, remoteType });
+            this.toast('跨网连接已建立（通路类型：' + (localType || '?') + '/' + (remoteType || '?') + '）', 'info');
         }
     },
 
     async _onConnectionState(pc, isCrossNetwork, role) {
         const state = pc.connectionState;
         if (state === 'connected') {
-            // 判断是否经 TURN 中继（candidate-pair 用了 relay 候选）
-            let viaTurn = false;
-            try {
-                const stats = await pc.getStats();
-                stats.forEach(r => {
-                    if (r.type === 'candidate-pair' && r.state === 'succeeded' &&
-                        (r.localCandidateId || r.remoteCandidateId)) {
-                        // 通过关联候选判断是否为 relay
-                    }
-                });
-                // 直接从 candidate 统计里看是否存在 relay 类型
-                let relayIds = new Set();
-                stats.forEach(r => {
-                    if (r.type === 'local-candidate' && r.candidateType === 'relay') relayIds.add(r.id);
-                    if (r.type === 'remote-candidate' && r.candidateType === 'relay') relayIds.add(r.id);
-                });
-                stats.forEach(r => {
-                    if (r.type === 'candidate-pair' && r.state === 'succeeded') {
-                        if (relayIds.has(r.localCandidateId) || relayIds.has(r.remoteCandidateId)) viaTurn = true;
-                    }
-                });
-            } catch {}
-            this._analyzeConnection(pc, isCrossNetwork, viaTurn);
-            // 暂存 TURN 状态，等 DataChannel 真正打开后再由 onopen 回写 netCapPill
-            this._lastViaTurn = viaTurn;
+            // 通路类型分析与 _lastViaTurn 检测统一在 _analyzeConnection 内完成
+            this._analyzeConnection(pc, isCrossNetwork);
             // 不在 ICE connected 阶段写 Pill —— DC 可能尚未打开，甚至信令已被 WS 断连阻断。
             // 真正成功时由 DataChannel onopen 或传输完成回调回写 setNetCapResult。
         } else if (state === 'failed') {
@@ -1854,7 +2143,7 @@ const App = {
             if (addr.startsWith('fe80') || addr.startsWith('fc') || addr.startsWith('fd') || addr.startsWith('::1')) return false;
             return /^2[0-9a-f]/i.test(addr) || /^3[0-9a-f]/i.test(addr);
         };
-        let localHasPublicV6 = false, remoteHasPublicV6 = false, hasTurn = false;
+        let localHasPublicV6 = false, remoteHasPublicV6 = false, sawRelay = false;
         try {
             const stats = await pc.getStats();
             stats.forEach(r => {
@@ -1862,9 +2151,13 @@ const App = {
                     if (r.type === 'local-candidate' && isPublicV6(r.address)) localHasPublicV6 = true;
                     if (r.type === 'remote-candidate' && isPublicV6(r.address)) remoteHasPublicV6 = true;
                 }
-                if (r.candidateType === 'relay' || (r.urls || '').toString().includes('turn:')) hasTurn = true;
+                // candidate 统计报告里没有 urls 字段（Chrome 用单数 url），
+                // 探测结果 _natHasTurn 才是"是否配置 TURN"的可靠来源；relay 候选出现说明尝试过中继
+                if (r.candidateType === 'relay') sawRelay = true;
             });
         } catch {}
+        // 是否配置了 TURN（并尝试过）：配置了但失败 → TURN 中继不可用
+        const hasTurn = !!this._natHasTurn || sawRelay;
 
         if (hasTurn) {
             this.toast('跨网连接失败：TURN 中继不可用，请检查 TURN_URLS 配置或网络', 'error');
@@ -1882,6 +2175,11 @@ const App = {
         if (this._reconnectWaitTimer) {
             clearTimeout(this._reconnectWaitTimer);
             this._reconnectWaitTimer = null;
+        }
+        // 清理直连失败后的 TURN 降级等待定时器（发送端已重建 offer，无需再等）
+        if (this._recvDegradeTimer) {
+            clearTimeout(this._recvDegradeTimer);
+            this._recvDegradeTimer = null;
         }
         // 优先用 payload.fromId（后端已注入），兜底用顶层 msg.fromId
         const fromId = payload.fromId || msgFromId;
@@ -1902,8 +2200,22 @@ const App = {
             this._recvPC = null;
         }
         this._recvDone = false;
-        const iceServers = await this.fetchIceServers();
-        const pc = new RTCPeerConnection({ iceServers });
+        // 重置上一轮的接收状态：meta 到达前旧值残留会造成误判
+        // （如新 DC 刚建立即断开时，dc.onclose 用旧 _recvSize/_recvTotal 误报"已收 N 字节未完成"）
+        this._recvSize = 0;
+        this._recvTotal = 0;
+        this._recvBuffer = [];
+        this._recvFlushSize = 0;
+        this._recvFlushing = false;
+        this._recvWriteInitInProgress = false;
+        clearTimeout(this._recvFinishTimer);
+        this._recvFinishTimer = null;
+        this._recvChunkIndex = 0;
+        this._recvPendingFinish = false;
+        // 接收端始终使用完整列表（含 TURN）：中继需要双方都分配 relay 候选；
+        // 发送端直连失败后降级重建 offer 时，本端已带 TURN，可正常建立中继。
+        const iceCfg = await this._getIceServersForConnection(false);
+        const pc = new RTCPeerConnection({ iceServers: iceCfg.servers });
         this._recvPC = pc;
         this._recvTaskId = taskId;
         // 候选缓存：trickle 候选可能早于 answer 到达，先缓存到 pc._candCache，
@@ -1927,7 +2239,12 @@ const App = {
         pc.ondatachannel = (e) => {
             const dc = e.channel;
             dc.binaryType = 'arraybuffer';
-            dc.onopen = () => { this._startDcHeartbeat(dc); this.setNetCapResult(true, false); };
+            dc.onopen = () => {
+                this._startDcHeartbeat(dc);
+                // 接收端同样按真实通路回写：_lastViaTurn 由 _analyzeConnection 检测，
+                // 实际走 TURN 中继时不能误显示"直连"
+                if (this._lastViaTurn !== undefined) this.setNetCapResult(true, this._lastViaTurn);
+            };
             dc.onmessage = (event) => this.onDataChannelMessage(event.data);
             dc.onclose = () => {
                 this._stopDcHeartbeat(dc);
@@ -1992,6 +2309,9 @@ const App = {
             let handled = false;
             return () => {
                 const state = pc.connectionState;
+                // 已被新 offer 替换 / 已清理的旧连接：忽略其所有状态回调，
+                // 否则旧连接 close 触发的异步回调会因 _recvDone=false、_recvSize=0 而误报"未收到数据"
+                if (this._recvPC !== pc) return;
                 console.log('[recvPC] connectionState:', state);
                 if (state === 'connected') {
                     this._analyzeConnection(pc, inRoom);
@@ -2000,7 +2320,15 @@ const App = {
                     if (this._recvDone) { console.warn('[recvPC] PC failed 但传输已完成，正常'); return; }
                     if (!handled) {
                         handled = true;
-                        this._onConnectionState(pc, inRoom, 'recv');
+                        // 无论是否带 TURN，首轮连接都可能失败于"发送端尚未拿到 relay pair"
+                        // （发送端直连失败后正在降级 TURN 并重建 offer）。
+                        // 静默等待新 offer（20s 超时），避免误报"跨网连接失败"。
+                        console.warn('[recvPC] 连接失败，等待发送端降级/重试...');
+                        clearTimeout(this._recvDegradeTimer);
+                        this._recvDegradeTimer = setTimeout(() => {
+                            if (this._recvDone || (this._recvPC && this._recvPC.connectionState === 'connected')) return;
+                            this._onConnectionState(pc, inRoom, 'recv');
+                        }, 20000);
                     }
                 } else if (state === 'disconnected' && !handled) {
                     if (this._recvDone) { console.warn('[recvPC] 连接断开（已完成），正常'); return; }
@@ -2085,16 +2413,20 @@ const App = {
 
                 // 如果有文件句柄，创建可写流（流式写盘）
                 if (this._recvFileHandle) {
-                    // createWritable 是异步的，用 _recvWriteReady 协调，避免 _finishReceive 关闭后句柄被覆盖
+                    // createWritable 是异步的，用 _recvWriteReady 协调，避免 _finishReceive 关闭后句柄被覆盖。
+                    // _recvWriteInitInProgress 防止 init 的 while 循环与 onDataChannelMessage 的 5MB flush
+                    // 并发交换 _recvBuffer → init 循环提前看到空数组 → 磁盘文件丢失数据。
+                    this._recvWriteInitInProgress = true;
                     this._recvWriteReady = this._recvFileHandle.createWritable().then(async w => {
                         // 先把 createWritable 期间缓冲的分片写入（保持顺序）
                         while (this._recvBuffer.length > 0) {
                             const buf = this._recvBuffer.shift();
                             await w.write(buf);
                         }
+                        this._recvWriteInitInProgress = false;
                         this._recvWritable = w;
                         return w;
-                    }).catch(() => { this._recvWritable = null; this._recvWriteReady = null; });
+                    }).catch(() => { this._recvWriteInitInProgress = false; this._recvWritable = null; this._recvWriteReady = null; });
                 } else {
                     this._recvWriteReady = null;
                 }
@@ -2110,29 +2442,27 @@ const App = {
                 // 跨网传输时若最后几片/本消息本身乱序或丢失，_recvSize 会小于 _recvTotal，
                 // 此时不能立即 finish，否则表现为“收不完”或写出不完整文件。
                 if (this._recvSize >= this._recvTotal) {
-                    // 数据完整：先把文件落盘，落盘成功后再回 ack 并关闭连接，
-                    // 避免发送端收到 ack 立即 close 导致本端尚未写完。
-                    // 注意：必须在 _finishReceive 之前保存 DC 引用，
-                    // 因为 _finishReceive 的 finally 会置空 this._recvDC
-                    const dc = this._recvDC;
-                    this._finishReceive().then(() => {
-                        try { dc && dc.send(JSON.stringify({ type: 'done_ack' })); } catch {}
-                    });
+                    // 数据完整：先落盘，_finishReceive 内部会在关闭连接前回发 done_ack
+                    this._finishReceive();
                 } else {
                     // 数据不完整：记录待完成，等剩余二进制到达补齐后再 finish。
                     this._recvPendingFinish = true;
                     const need = this._recvTotal - this._recvSize;
                     console.warn(`[recv] 收到 done 但数据不完整，已收 ${this._recvSize}/${this._recvTotal}，等待补齐 ${need} 字节`);
-                    // 兜底：若 8 秒内仍补齐不全，按失败处理并提示真实原因
+                    // 兜底：若 8 秒内仍补齐不全，按失败处理并提示真实原因。
+                    // 不重置 _recvDone：保留该标记可抑制后续 close/failed 异步回调的误报 toast。
                     clearTimeout(this._recvFinishTimer);
                     this._recvFinishTimer = setTimeout(() => {
                         if (!this._recvDone || this._recvSize < this._recvTotal) {
                             this._recvPendingFinish = false;
-                            this._recvDone = false;
                             console.error('[recv] 等待补齐超时，文件接收未完成');
                             this.toast(`接收未完成：缺少 ${this._recvTotal - this._recvSize} 字节（连接可能中断）`, 'error');
                             this.updateReceiveStatus('failed');
                             this.closeProgress();
+                            // 超时后关闭连接，防止残留状态导致后续 close/failed 误弹错误
+                            if (this._recvDC) { this._stopDcHeartbeat(this._recvDC); try { this._recvDC.close(); } catch {} this._recvDC = null; }
+                            if (this._recvPC) { try { this._recvPC.close(); } catch {} this._recvPC = null; }
+                            this.releaseWakeLock();
                         }
                     }, 8000);
                 }
@@ -2158,7 +2488,7 @@ const App = {
             this._recvBuffer.push(data);
             this._recvFlushSize += data.byteLength;
 
-            if (this._recvFlushSize >= 5 * 1024 * 1024 && !this._recvFlushing) {
+            if (this._recvFlushSize >= 5 * 1024 * 1024 && !this._recvFlushing && !this._recvWriteInitInProgress) {
                 const bufferToFlush = this._recvBuffer;
                 this._recvBuffer = [];
                 this._recvFlushSize = 0;
@@ -2178,20 +2508,25 @@ const App = {
             if (this._recvPendingFinish && this._recvSize >= this._recvTotal) {
                 this._recvPendingFinish = false;
                 clearTimeout(this._recvFinishTimer);
-                const dc = this._recvDC;
-                this._finishReceive().then(() => {
-                    try { dc && dc.send(JSON.stringify({ type: 'done_ack' })); } catch {}
-                });
+                this._finishReceive();
             }
         }
     },
 
     async _finishReceive() {
         const item = this.receiveHistory.find(i => i.taskId === this._recvTaskId);
+        // 立即释放 _recvPC / _recvDC 引用（不关闭连接），防止 _finishReceive 内的异步落盘
+        // （await dbPutChunk / await writable.close 等）期间，发送端已发来下一文件 transfer_request，
+        // onTransferRequest 的 _recvPC 守卫误判"仍在接收中"而自动拒绝。
+        // 连接句柄保存到局部变量供 finally 关闭，_recvDC 在落盘成功后仍需发送 done_ack。
+        const closingPC = this._recvPC;
+        const closingDC = this._recvDC;
+        this._recvPC = null;
+        this._recvDC = null;
         try {
             // 图片/视频自动预览：单文件直接预览，多文件取第一个预览
             const isMedia = this.isImage(this._recvName) || this.isVideo(this._recvName);
-            const shouldPreview = isMedia && (this._recvTotal <= 1 || this._recvIndex === 0);
+            const shouldPreview = isMedia && ((this._recvFileTotal ?? 1) <= 1 || this._recvIndex === 0);
 
             if (this._recvWritable || this._recvWriteReady) {
                 // 流式写盘模式（桌面端 Chrome/Edge）：等待可写流就绪并关闭，文件已保存到磁盘
@@ -2275,30 +2610,36 @@ const App = {
                 // 图片和视频自动弹出预览，其他文件显示 Toast
                 if (shouldPreview) {
                     this.openPreviewFromDB(this._recvTaskId, this._recvName);
-                } else if (isMedia && this._recvTotal > 1) {
-                    this.toast(`已接收 ${this._recvIndex + 1}/${this._recvTotal} 个文件`, 'success');
+                } else if (isMedia && (this._recvFileTotal ?? 1) > 1) {
+                    this.toast(`已接收 ${this._recvIndex + 1}/${this._recvFileTotal} 个文件`, 'success');
                 } else {
                     this.toast('接收完成，点击「查看」可下载', 'success');
                 }
             }
 
             this.send({ type: 'transfer_complete', payload: { taskId: this._recvTaskId, toId: item?.fromId } });
+
+            // 落盘成功：在关闭连接前回发 done_ack，让发送端确认"接收完成"。
+            // 必须在 finally 关闭 DC 之前发送——此前调用方在 _finishReceive().then() 里发 ack，
+            // 但 finally 已先关闭 DC，ack 永远发不出去，导致发送端等不到确认而误报完成/提前断开。
+            if (closingDC && closingDC.readyState === 'open') {
+                try { closingDC.send(JSON.stringify({ type: 'done_ack' })); } catch {}
+            }
         } catch (err) {
             console.error('[_finishReceive] 保存文件失败:', err);
             this.toast('文件保存失败，请重试', 'error');
             this.updateReceiveStatus('failed');
             this.closeProgress();
         } finally {
-            // 清理
-            this._stopDcHeartbeat(this._recvDC);
+            // 清理（使用局部变量，_recvPC/_recvDC 已在开头置 null 解除 onTransferRequest 守卫）
+            this._stopDcHeartbeat(closingDC);
             clearTimeout(this._recvFinishTimer);
             this._recvBuffer = [];
             if (this._recvWritable) { try { this._recvWritable.close(); } catch {} this._recvWritable = null; }
             this._recvWriteReady = null;
-            if (this._recvDC) { try { this._recvDC.close(); } catch {} }
-            this._recvDC = null;
+            if (closingDC) { try { closingDC.close(); } catch {} }
             this._recvFileHandle = null;
-            if (this._recvPC) { this._recvPC.close(); this._recvPC = null; }
+            if (closingPC) { try { closingPC.close(); } catch {} }
             this.releaseWakeLock();
         }
     },
@@ -2368,7 +2709,7 @@ const App = {
         this.send({ type: 'transfer_accept', payload: { fromId, taskId } });
         this.$('receiveOverlay').classList.add('hidden');
         this.requestWakeLock();  // 接收期间保持屏幕常亮
-        this._recvTotal = this.pendingReceive.total;
+        this._recvFileTotal = this.pendingReceive.total; // 本次发送的总文件数（与 _recvTotal=文件字节数区分）
         this._recvIndex = this.pendingReceive.index;
         this.receiveHistory.unshift({ taskId, fileName, fileSize, fromName, fromId, time: new Date(), status: 'waiting' });
         this.pendingReceive = null;
@@ -2688,6 +3029,9 @@ const App = {
         this.$('progressSpeed').textContent = speed > 0 ? `${this.formatSize(speed)}/s` : '—';
     },
     showProgressDone() {
+        // 传输成功兜底回写网络能力提示：若 dc.onopen 早于 ICE connected 导致
+        // _lastViaTurn 未设置，Pill 会停留在预测文本，这里统一按最终成功回写
+        if (this._lastViaTurn !== undefined) this.setNetCapResult(true, this._lastViaTurn === true);
         this.$('progressStatus').textContent = '完成';
         this.$('progressStatus').classList.add('done');
         this.$('progressFill').style.width = '100%';
@@ -2745,6 +3089,14 @@ const App = {
                 this.send({ type: 'transfer_cancel', payload: { taskId, toId } });
             }
         }
+        // 本端主动取消标记：startSend 循环/重传据此立即停止，
+        // 避免取消后 sendFileP2P 因连接被关闭抛出"连接中断"错误而再次触发自动重传
+        this._sendCancelled = true;
+        // 立即结束等待中的 accept（resolve 'cancelled'），否则 waitForAccept 会悬挂到 60s 超时
+        this._acceptWaiters.forEach(resolve => resolve('cancelled'));
+        this._acceptWaiters.clear();
+        this._acceptHandlers.clear();
+        this._rejectHandlers.clear();
         // 更新接收状态为失败
         this.updateReceiveStatus('failed');
         // 关闭进度弹窗
@@ -2761,6 +3113,11 @@ const App = {
             clearTimeout(this._reconnectWaitTimer);
             this._reconnectWaitTimer = null;
         }
+        // 清理接收端 TURN 降级等待定时器（取消后残留会在 20s 后误报"连接失败"）
+        if (this._recvDegradeTimer) {
+            clearTimeout(this._recvDegradeTimer);
+            this._recvDegradeTimer = null;
+        }
         // 清理进度弹窗自动关闭定时器
         if (this._doneAutoCloseTimer) {
             clearTimeout(this._doneAutoCloseTimer);
@@ -2771,16 +3128,31 @@ const App = {
         if (this._sendPC) { try { this._sendPC.close(); } catch {} this._sendPC = null; }
         this._sendTaskId = null;
         this._sendDoneAckResolve = null;
+        // 清理等待 accept 的悬挂 Promise 与取消标记（防止残留状态影响下一次传输）
+        this._acceptWaiters.clear();
+        this._acceptHandlers.clear();
+        this._rejectHandlers.clear();
+        // 注意：_sendCancelled 不在此重置——cancelTransfer 置位后 waitForAccept 立即
+        // resolve('cancelled') 回到 startSend 循环，cleanupAllTransfers 紧随其后重置此标记
+        // 会导致 startSend 检查 _sendCancelled 时已为 false，取消检测失效。
         // 关闭接收端（先停心跳再关连接）
         if (this._recvDC) { this._stopDcHeartbeat(this._recvDC); try { this._recvDC.close(); } catch {} this._recvDC = null; }
         if (this._recvPC) { try { this._recvPC.close(); } catch {} this._recvPC = null; }
         this._recvTaskId = null;
         // 清理接收缓冲和文件句柄
+        clearTimeout(this._recvFinishTimer);
+        this._recvFinishTimer = null;
+        this._recvPendingFinish = false;
         this._recvBuffer = [];
         this._recvFlushing = false;
+        this._recvFlushSize = 0;
+        this._recvWriteInitInProgress = false;
         if (this._recvWritable) { try { this._recvWritable.close(); } catch {} this._recvWritable = null; }
         this._recvWriteReady = null;
         this._recvFileHandle = null;
+        // 重置发送端 TURN 降级/直连重试标记，避免残留状态污染下一次传输
+        this._sendRetriedTurn = false;
+        this._forceTurn = false;
         // 重置网络能力探测结果
         this._lastViaTurn = undefined;
         this._lastNetCapResult = undefined;
@@ -2793,7 +3165,7 @@ const App = {
         this.activeUpload = false;
         this.clearFiles();
         this.selectedTarget = null;
-        this.updateNetCapPill('unknown');
+        this._updateNetCapPill('unknown');
         // 释放屏幕常亮
         this.releaseWakeLock();
     },

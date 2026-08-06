@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"log"
 	"net/http"
+	"strings"
 
 	"fn_qycs/service"
 )
@@ -39,7 +40,7 @@ func HandleIceServers(w http.ResponseWriter, r *http.Request) {
 
 	// TURN 中继（配置了才启用）
 	if settings.TurnServer != "" {
-		turn := ICEServer{URLs: splitAndTrim(settings.TurnServer)}
+		turn := ICEServer{URLs: normalizeRelayURLs(splitAndTrim(settings.TurnServer), "turn")}
 		if settings.TurnUsername != "" {
 			turn.Username = settings.TurnUsername
 			turn.Credential = settings.TurnPassword
@@ -49,7 +50,7 @@ func HandleIceServers(w http.ResponseWriter, r *http.Request) {
 
 	// TURNS (TLS) 中继（配置了才启用）
 	if settings.TurnsServer != "" {
-		turns := ICEServer{URLs: splitAndTrim(settings.TurnsServer)}
+		turns := ICEServer{URLs: normalizeRelayURLs(splitAndTrim(settings.TurnsServer), "turns")}
 		if settings.TurnsUsername != "" {
 			turns.Username = settings.TurnsUsername
 			turns.Credential = settings.TurnsPassword
@@ -100,4 +101,23 @@ func splitAndTrim(s string) []string {
 		parts = append(parts, cur)
 	}
 	return parts
+}
+
+// normalizeRelayURLs 确保中继服务器地址带协议前缀。
+// 用户在传送设置中可能只填裸地址（如 free.expressturn.com:3478），
+// 浏览器会把它当作 STUN 服务器而非 TURN，导致中继无法工作，也会让前端
+// 误判为"未配置 TURN"。这里自动补全 turn:/turns: 前缀（已有前缀则保留）。
+func normalizeRelayURLs(urls []string, scheme string) []string {
+	out := make([]string, 0, len(urls))
+	for _, u := range urls {
+		u = strings.TrimSpace(u)
+		lower := strings.ToLower(u)
+		if strings.HasPrefix(lower, "turn:") || strings.HasPrefix(lower, "turns:") ||
+			strings.HasPrefix(lower, "stun:") || strings.HasPrefix(lower, "stuns:") {
+			out = append(out, u)
+			continue
+		}
+		out = append(out, scheme+":"+u)
+	}
+	return out
 }

@@ -1,9 +1,14 @@
 package service
 
 import (
+	"database/sql"
 	"encoding/json"
+	"fmt"
+	"log"
 	"os"
 	"path/filepath"
+
+	"fn_qycs/store"
 )
 
 // AppSettings 应用设置（传送设置）
@@ -18,20 +23,6 @@ type AppSettings struct {
 	TurnsPassword string `json:"turns_password"`
 }
 
-// settingsDataDir 返回设置数据目录（与 main.DataDir 逻辑一致）
-func settingsDataDir() string {
-	if d := os.Getenv("DATA_DIR"); d != "" {
-		return d
-	}
-	if pkgVar := os.Getenv("TRIM_PKGVAR"); pkgVar != "" {
-		return filepath.Join(pkgVar, "data")
-	}
-	if appDest := os.Getenv("TRIM_APPDEST"); appDest != "" {
-		return filepath.Join(appDest, "data")
-	}
-	return filepath.Join(os.TempDir(), "fn_qycs")
-}
-
 // GetDefaultSettings 返回默认设置
 func GetDefaultSettings() *AppSettings {
 	return &AppSettings{
@@ -40,37 +31,72 @@ func GetDefaultSettings() *AppSettings {
 	}
 }
 
-// LoadSettings 读取设置，找不到返回默认值
+// LoadSettings 从 SQLite 读取设置。首次启动时自动从旧 app-settings.json 迁移数据。
 func LoadSettings() *AppSettings {
-	configPath := filepath.Join(settingsDataDir(), "app-settings.json")
-	data, err := os.ReadFile(configPath)
+	db := store.DB()
+	s := &AppSettings{}
+	err := db.QueryRow(`SELECT max_file_size_mb, stun_server, turn_server, turn_username, turn_password,
+		turns_server, turns_username, turns_password FROM app_settings WHERE id = 1`).Scan(
+		&s.MaxFileSizeMB, &s.StunServer, &s.TurnServer, &s.TurnUsername, &s.TurnPassword,
+		&s.TurnsServer, &s.TurnsUsername, &s.TurnsPassword,
+	)
 	if err != nil {
+		// 首次运行：尝试从旧 JSON 迁移
+		if migrated := migrateFromJSON(s); migrated {
+			// 迁移成功，写入 DB（静默）
+			SaveSettings(s)
+			log.Println("[DB] 已从 app-settings.json 迁移设置到 SQLite")
+			return s
+		}
 		return GetDefaultSettings()
 	}
-	var s AppSettings
-	if err := json.Unmarshal(data, &s); err != nil {
-		return GetDefaultSettings()
+	defaults := GetDefaultSettings()
+	if s.StunServer == "" {
+		s.StunServer = defaults.StunServer
 	}
-	// 回填默认值
+	if s.MaxFileSizeMB <= 0 {
+		s.MaxFileSizeMB = defaults.MaxFileSizeMB
+	}
+	return s
+}
+
+// SaveSettings 保存设置到 SQLite
+func SaveSettings(s *AppSettings) error {
+	db := store.DB()
 	if s.StunServer == "" {
 		s.StunServer = "stun:stun.l.google.com:19302,stun:stun1.l.google.com:19302"
 	}
 	if s.MaxFileSizeMB <= 0 {
 		s.MaxFileSizeMB = 50
 	}
-	return &s
+	_, err := db.Exec(`UPDATE app_settings SET max_file_size_mb=?, stun_server=?, turn_server=?, turn_username=?, turn_password=?,
+		turns_server=?, turns_username=?, turns_password=?, updated_at=datetime('now') WHERE id=1`,
+		s.MaxFileSizeMB, s.StunServer, s.TurnServer, s.TurnUsername, s.TurnPassword,
+		s.TurnsServer, s.TurnsUsername, s.TurnsPassword,
+	)
+	if err != nil {
+		return fmt.Errorf("保存设置失败: %w", err)
+	}
+	return nil
 }
 
-// SaveSettings 保存设置到磁盘
-func SaveSettings(s *AppSettings) error {
-	data, err := json.MarshalIndent(s, "", "  ")
+// migrateFromJSON 尝试从旧 app-settings.json 迁移数据，成功返回 true
+func migrateFromJSON(s *AppSettings) bool {
+	configPath := filepath.Join(store.DataDir(), "app-settings.json")
+	data, err := os.ReadFile(configPath)
 	if err != nil {
-		return err
+		return false
 	}
-	configPath := filepath.Join(settingsDataDir(), "app-settings.json")
-	dir := filepath.Dir(configPath)
-	if err := os.MkdirAll(dir, 0755); err != nil {
-		return err
+	// 此文件可能被 check 到仓库（如 app-settings.example.json），解码失败则不迁移
+	if err := json.Unmarshal(data, s); err != nil {
+		return false
 	}
-	return os.WriteFile(configPath, data, 0644)
+	// 迁移完成后删除原 JSON 避免重复迁移
+	os.Remove(configPath)
+	return true
+}
+
+// ---- 兼容旧调用：返回 sql.DB 供其他模块直接使用 ----
+func GetDB() *sql.DB {
+	return store.DB()
 }
