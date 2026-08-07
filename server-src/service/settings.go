@@ -69,6 +69,9 @@ func SaveSettings(s *AppSettings) error {
 	if s.MaxFileSizeMB <= 0 {
 		s.MaxFileSizeMB = 50
 	}
+	if s.MaxFileSizeMB > 2048 {
+		s.MaxFileSizeMB = 2048
+	}
 	_, err := db.Exec(`UPDATE app_settings SET max_file_size_mb=?, stun_server=?, turn_server=?, turn_username=?, turn_password=?,
 		turns_server=?, turns_username=?, turns_password=?, updated_at=datetime('now') WHERE id=1`,
 		s.MaxFileSizeMB, s.StunServer, s.TurnServer, s.TurnUsername, s.TurnPassword,

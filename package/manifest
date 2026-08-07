@@ -1,7 +1,7 @@
 appname               = fn_qycs
-version               = 2.1.0
+version               = 2.1.1
 display_name          = 千盈传送
-desc                  = 临时救场，收发文件，一个网页搞定！<br><br>微信传不了？U 盘找不到？发个链接，对方浏览器打开就能收<br><br>局域网互传：同 WiFi / 同子网设备自动发现，点对点直传<br>跨公网互传：通过暗号房间，异地也能直传文件<br><br>基于 WebRTC P2P 技术，文件不经过服务器<br>NAT 穿透优先直连，失败自动降级 TURN 中继<br>网关内置 TURN/TURNS 服务器连通性测试<br>SQLite 数据库持久化存储，密码凭据完整保存<br>网络能力实时探测（公网 IPv6 / IPv4 / NAT 打洞 / TURN 可达性）<br>单文件大小可自定义（默认 50MB，最高 99999MB）<br><br>手机接收的图片/视频可直接保存到系统相册<br>iOS、Android、Windows、macOS 全平台支持<br><br>内置反向代理，搭配飞牛 DDNS 即可外网访问<br>主题跟随系统明暗自动切换<br>网关管理面板仅允许统一网关访问，安全防护
+desc                  = 临时救场，收发文件，一个网页搞定！<br><br>微信传不了？U 盘找不到？发个链接，对方浏览器打开就能收<br><br>局域网互传：同 WiFi / 同子网设备自动发现，点对点直传<br>跨公网互传：通过暗号房间，异地也能直传文件<br><br>基于 WebRTC P2P 技术，文件不经过服务器<br>NAT 穿透优先直连，失败自动降级 TURN 中继<br>网关内置 TURN/TURNS 服务器连通性测试<br>SQLite 数据库持久化存储，密码凭据完整保存<br>网络能力实时探测（公网 IPv6 / IPv4 / NAT 打洞 / TURN 可达性）<br>单文件大小可自定义（默认 50MB，最高 2GB / 2048MB）<br><br>手机接收的图片/视频可直接保存到系统相册<br>iOS、Android、Windows、macOS 全平台支持<br><br>内置反向代理，搭配飞牛 DDNS 即可外网访问<br>主题跟随系统明暗自动切换<br>网关管理面板仅允许统一网关访问，安全防护
 platform              = all
 source                = thirdparty
 service_port          = 5553
@@ -16,4 +16,4 @@ maintainer            = 豪子
 maintainer_url        = https://github.com/Contribuv/fn_qycs
 distributor           = 豪子
 distributor_url       = https://github.com/Contribuv/fn_qycs
-changelog             = v2.1.0<br>• 新增 TURN/TURNS 中继服务器连通性测试按钮<br>• 新增 SQLite 数据库替代 JSON 文件存储（密码凭据完整持久化、ICE 与网关同一数据源）<br>• 新增 TURN 中继后台可达性验证（探测是否真能获取 relay 候选）<br>• 新增 gateway API 路径 TCP/Unix 自适应<br>• 修复网关设置保存后测试按钮功能丢失（密码掩码不一致导致超时）<br>• 优化网络能力提示文案，使用真实中继结果回写 Pill 状态<br>• 优化网关传送设置推荐文案，更新免费 TURN 推荐至 metered.ca
+changelog             = v2.1.1<br>• 文件大小限制默认 50MB，最大 2GB（2048MB），建议不超过 500MB<br>• 新增移动端超 100MB 文件 blob 问题提示（技术瓶颈，PC 端不受影响）<br>v2.1.0<br>• 新增 TURN/TURNS 中继服务器连通性测试按钮<br>• 新增 SQLite 数据库替代 JSON 文件存储（密码凭据完整持久化、ICE 与网关同一数据源）<br>• 新增 TURN 中继后台可达性验证（探测是否真能获取 relay 候选）<br>• 新增 gateway API 路径 TCP/Unix 自适应<br>• 修复网关设置保存后测试按钮功能丢失（密码掩码不一致导致超时）<br>• 优化网络能力提示文案，使用真实中继结果回写 Pill 状态<br>• 优化网关传送设置推荐文案，更新免费 TURN 推荐至 metered.ca

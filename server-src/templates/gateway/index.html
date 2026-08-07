@@ -270,8 +270,9 @@
                 <div class="settings-scroll-area">
                 <div class="form-group">
                     <label class="form-label">文件大小限制 (MB)</label>
-                    <input type="number" class="form-input" id="maxFileSize" value="50" min="1" max="99999" style="width:160px">
+                    <input type="number" class="form-input" id="maxFileSize" value="50" min="1" max="2048" style="width:160px">
                     <div class="form-help">超大文件传输受超时限制，建议不超过 500 MB。</div>
+                    <div class="form-help" style="color:#e6a23c;">注意：文件超过 100 MB 时，移动端保存到相册或下载会出现 blob 文件大小为 0，下载 100% 失败，PC 端不受影响。此为当前技术瓶颈，暂无解决方案。</div>
                 </div>
                 <div class="form-group">
                     <label class="form-label">STUN 服务器</label>

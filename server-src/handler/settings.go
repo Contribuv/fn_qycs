@@ -34,6 +34,9 @@ func HandleSettings(w http.ResponseWriter, r *http.Request) {
 		if s.MaxFileSizeMB <= 0 {
 			s.MaxFileSizeMB = 50
 		}
+		if s.MaxFileSizeMB > 2048 {
+			s.MaxFileSizeMB = 2048
+		}
 		if err := service.SaveSettings(&s); err != nil {
 			log.Printf("settings save error: %v", err)
 			w.WriteHeader(http.StatusInternalServerError)
